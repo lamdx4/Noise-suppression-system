@@ -1,2 +1,12 @@
-/references/*
+/references/
+
+# AI workspace exclusions
+ai/models/
+ai/notebooks/.ipynb_checkpoints/
+ai/**/*.pth
+ai/**/*.pt
+ai/**/*.ckpt
+ai/**/*.h5
+ai/**/*.pb
+*
 /data/*
