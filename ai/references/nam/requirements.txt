@@ -1,7 +1,0 @@
-numpy
-scipy
-sounddevice
-flask
-pydub
-eel
-pyaudio

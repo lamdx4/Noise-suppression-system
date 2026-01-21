@@ -1,0 +1,60 @@
+# Default RNNoise Training Configuration
+
+# Model parameters
+model:
+  input_dim: 42 # Số features đầu vào (từ dump_features)
+  output_dim: 22 # Số Bark bands (gains output)
+  cond_size: 128 # Conv1D output size
+  gru_size: 384 # GRU hidden size (384 = best quality)
+
+# Training parameters
+training:
+  epochs: 150 # Số epochs train
+  batch_size: 128 # Batch size (tùy GPU RAM)
+  learning_rate: 0.001 # Initial learning rate
+  lr_decay: 0.00005 # LR decay factor
+  sequence_length: 2000 # Frames per sequence (2000 = 20 seconds)
+
+  # Loss weights
+  gamma: 0.25 # Perceptual loss exponent
+  vad_weight: 0.001 # VAD loss weight (auxiliary task)
+
+  # Optimizer
+  adam_betas: [0.8, 0.98] # Adam beta parameters
+  adam_eps: 1.0e-8 # Adam epsilon
+
+# Sparsification
+sparsification:
+  enabled: true # Enable sparse training
+  start_step: 6000 # Bắt đầu pruning
+  stop_step: 20000 # Kết thúc pruning
+  interval: 100 # Prune mỗi N steps
+  exponent: 3 # Cubic interpolation
+
+  # Per-gate sparsity targets
+  targets:
+    W_hr: 0.3 # Recurrent reset: 30% sparsity
+    W_hz: 0.2 # Recurrent update: 20% sparsity (least aggressive)
+    W_hn: 0.5 # Recurrent new: 50% sparsity (most aggressive)
+    W_ir: 0.3 # Input reset: 30% sparsity
+    W_iz: 0.2 # Input update: 20% sparsity
+    W_in: 0.5 # Input new: 50% sparsity
+
+  # Block structure
+  block_size: [8, 4] # Hardware-friendly 8×4 blocks
+
+# Data
+data:
+  features_file: "features.f32" # Path to feature file
+  num_workers: 4 # DataLoader workers
+
+# Logging
+logging:
+  log_dir: "ai/logs" # Log directory
+  experiment_name: "rnnoise" # Experiment name
+  save_interval: 1 # Save checkpoint every N epochs
+
+# Hardware
+hardware:
+  device: "cuda" # "cuda" or "cpu"
+  cuda_visible_devices: null # GPU IDs (null = use CUDA_VISIBLE_DEVICES env)
