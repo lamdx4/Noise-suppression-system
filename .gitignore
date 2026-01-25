@@ -9,3 +9,5 @@ ai/**/*.ckpt
 ai/**/*.h5
 ai/**/*.pb
 data/
+.vscode/
+.pio/
