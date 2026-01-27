@@ -29,9 +29,9 @@ target_compile_definitions(${COMPONENT_LIB} PRIVATE
 )
 
 target_compile_options(${COMPONENT_LIB} PRIVATE
-    # === Disable fast-math (ESP-IDF may enable it by default) ===
-    -fno-fast-math                  # Explicitly disable fast-math
-    -U__FAST_MATH__                 # Undefine __FAST_MATH__ macro
+    # === Enable fast-math for AI/DSP ===
+    -ffast-math                     # Enable fast-math (Flush-to-Zero for speed)
+    -D__FAST_MATH__
     
     # === Optimization ===
     -O3                             # Aggressive optimization

@@ -15,8 +15,6 @@
 #include <string.h>
 
 #include "constants/i2s_config_t.h"
-#include "rnnoise.h"
-
 // RNNoise includes
 extern "C"
 {
@@ -100,10 +98,13 @@ void wifi_init_sta(void)
   ESP_LOGI(TAG, "Connected! ESP32 IP: " IPSTR, IP2STR(&ip_info.ip));
 }
 
+#include "driver/gpio.h" // Add GPIO header
+
 i2s_chan_handle_t rx_handle = NULL;
 
 // === RNNoise Global State ===
 static DenoiseState *rnn_state = NULL;
+static volatile bool process_rnnoise = true; // Default ON, volatile for task visibility
 static float input_buffer[480];  // Float buffer for RNNoise input
 static float output_buffer[480]; // Float buffer for RNNoise output
 
@@ -179,9 +180,9 @@ void udp_audio_task(void *pvParameters)
   ESP_LOGI(TAG, "Streaming to %s:%d", PC_IP_ADDR, PC_PORT);
 
   size_t bytes_read = 0;
-  size_t buffer32_len = FRAME_SIZE * sizeof(int32_t);
+  size_t buffer32_len = FRAME_SIZE * 2 * sizeof(int32_t); // x2 for Stereo (L+R)
 
-  // Allocate buffers in PSRAM if available, or Heap
+  // Allocate buffers
   int32_t *buffer32 = (int32_t *)malloc(buffer32_len);
   int16_t *buffer16 = (int16_t *)malloc(FRAME_SIZE * sizeof(int16_t));
 
@@ -193,12 +194,34 @@ void udp_audio_task(void *pvParameters)
     return;
   }
 
+  // 5. Config Button (Boot Button = GPIO 0)
+  gpio_config_t io_conf = {};
+  io_conf.intr_type = GPIO_INTR_DISABLE;
+  io_conf.mode = GPIO_MODE_INPUT;
+  io_conf.pin_bit_mask = (1ULL << GPIO_NUM_0);
+  io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+  io_conf.pull_up_en = GPIO_PULLUP_ENABLE;
+  gpio_config(&io_conf);
+
+  int last_btn_state = 1;
+
   while (1)
   {
+    // === Button Logic (Simple Polling) ===
+    int btn_state = gpio_get_level(GPIO_NUM_0);
+    if (last_btn_state == 1 && btn_state == 0) {
+        // Falling edge (Pressed)
+        process_rnnoise = !process_rnnoise;
+        ESP_LOGW(TAG, "Noise Reduction Toggled: %s", process_rnnoise ? "ON" : "OFF");
+        vTaskDelay(pdMS_TO_TICKS(200)); // Debounce
+    }
+    last_btn_state = btn_state;
+
     // Read exactly one frame
     // We expect 480 samples. 32-bit mono = 480 * 4 bytes = 1920 bytes.
     if (i2s_channel_read(rx_handle, buffer32, buffer32_len, &bytes_read, 1000) == ESP_OK)
     {
+
 
       int samples_read = bytes_read / 4;
 
@@ -210,37 +233,42 @@ void udp_audio_task(void *pvParameters)
       {
         // Take only LEFT channel (index 0, 2, 4...)
         // buffer32[i * 2] is Left channel
-        buffer16[i] = (int16_t)(buffer32[i * 2] >> 16);
+        buffer16[i] = (int16_t)(buffer32[i * 2] >> 16); 
       }
 
-#if 0
-      // === RNNoise Processing (DISABLED FOR DEBUGGING) ===
-      if (rnn_state && samples_mono == 480) {
+      // === RNNoise Processing (ENABLED) ===
+      // #if 0
+      if (process_rnnoise && samples_mono == 480)
+      {
         // Step 1: Convert int16 → float
         convert_int16_to_float(buffer16, input_buffer, samples_mono);
-        
+
         // Step 2: Apply noise suppression
         uint64_t rnn_start = esp_timer_get_time();
         rnnoise_process_frame(rnn_state, output_buffer, input_buffer);
         uint64_t rnn_elapsed = esp_timer_get_time() - rnn_start;
-        
+
         // Step 3: Convert float → int16
         convert_float_to_int16(output_buffer, buffer16, samples_mono);
-        
-        // Log performance every 100 frames (~1.0 seconds) to reduce spam
+
+        // Log performance periodically
         static int perf_counter = 0;
-        if (perf_counter++ % 100 == 0) {
-          ESP_LOGI(TAG, "RNNoise: %llu us/frame, Heap: %d", 
+        if (perf_counter++ % 100 == 0)
+        {
+          ESP_LOGI(TAG, "RNNoise: %llu us/frame, Heap: %d",
                    rnn_elapsed, esp_get_free_heap_size());
         }
-      } else if (samples_mono != 480) {
+      }
+      else if (samples_mono != 480)
+      {
         // Only log warning occasionally to avoid serial spam causing lags
         static int warn_counter = 0;
-        if (warn_counter++ % 100 == 0) {
-             ESP_LOGW(TAG, "Frame size mismatch: %d (expected 480)", samples_mono);
+        if (warn_counter++ % 100 == 0)
+        {
+          ESP_LOGW(TAG, "Frame size mismatch: %d (expected 480)", samples_mono);
         }
       }
-#endif
+      // #endif
 
       // Send 16-bit UDP packet
       int err = sendto(sock, buffer16, samples_mono * 2, 0, (struct sockaddr *)&dest_addr,
@@ -257,6 +285,11 @@ void udp_audio_task(void *pvParameters)
           ESP_LOGE(TAG, "Tx Err: %d", errno);
         }
       }
+
+      // FIX: Yield to IDLE task to reset Watchdog (WDT)
+      // Since RNNoise takes ~8-9ms, we have a little CPU time left.
+      // vTaskDelay(1) ensures the IDLE task gets a chance to run.
+      vTaskDelay(1);
     }
     else
     {
@@ -296,16 +329,18 @@ extern "C" void app_main(void)
   if (!rnn_state)
   {
     ESP_LOGE(TAG, "Failed to create RNNoise state!");
+    process_rnnoise = false;
   }
   else
   {
     ESP_LOGI(TAG, "RNNoise initialized. Heap: %d", esp_get_free_heap_size());
+    process_rnnoise = true;
   }
 
   // 3. Init I2S
   i2s_init();
 
   // 4. Create Audio Task
-  // Increased Stack to 64KB (was 32KB), Priority 5, Core 1
-  xTaskCreatePinnedToCore(udp_audio_task, "audio_task", 65536, NULL, 5, &s_audio_task_handle, 1);
+  // Increased Stack to 128KB (was 64KB) to accommodate RNNoise + WiFi
+  xTaskCreatePinnedToCore(udp_audio_task, "audio_task", 131072, NULL, 5, &s_audio_task_handle, 1);
 }
