@@ -32,6 +32,7 @@
 #include "arch.h"
 #include "common.h"
 #include "vec.h"
+#include <stdio.h>
 
 #define CAT_SUFFIX2(a,b) a ## b
 #define CAT_SUFFIX(a,b) CAT_SUFFIX2(a, b)
@@ -136,9 +137,11 @@ void RTCD_SUF(compute_linear_) (const LinearLayer *linear, float *out, const flo
    M = linear->nb_inputs;
    N = linear->nb_outputs;
    if (linear->float_weights != NULL) {
+   //   printf("DEBUG: FLOAT PATH\n"); 
      if (linear->weights_idx != NULL) sparse_sgemv8x4(out, linear->float_weights, linear->weights_idx, N, in);
      else sgemv(out, linear->float_weights, N, M, N, in);
    } else if (linear->weights != NULL) {
+   //   printf("DEBUG: INT8 PATH\n");
      if (linear->weights_idx != NULL) sparse_cgemv8x4(out, linear->weights, linear->weights_idx, linear->scale, N, M, in);
      else cgemv8x4(out, linear->weights, linear->scale, N, M, in);
      /* Only use SU biases on for integer matrices on SU archs. */
