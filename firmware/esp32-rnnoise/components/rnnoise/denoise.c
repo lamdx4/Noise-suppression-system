@@ -489,7 +489,7 @@ float IRAM_ATTR rnnoise_process_frame(DenoiseState *st, float *out,
   silence = rnn_compute_frame_features(st, X, P, Ex, Ep, Exp, features, x);
   int64_t t_preprocess_end = esp_timer_get_time();
   // printf("[PROFILE] Preprocessing: %lld us\n",
-         t_preprocess_end - t_preprocess_start);
+  //        t_preprocess_end - t_preprocess_start);
 
   // === PROFILING: Stage 3 - Postprocessing ===
   int64_t t_postprocess_start = esp_timer_get_time();
