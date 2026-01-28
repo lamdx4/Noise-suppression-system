@@ -33,5 +33,6 @@
 
 #include "nnet.h"
 #include "nnet_arch.h" // ESP32 PORT: Provides compute_linear_c, compute_activation_c, etc.
+#include <esp_attr.h>
 // ESP32 PORT: Disabled x86-specific optimizations
 // #include "x86/x86_arch_macros.h"x

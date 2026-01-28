@@ -13,7 +13,11 @@ idf_component_register(
     INCLUDE_DIRS
         "."
     PRIV_REQUIRES
-        ""
+        esp_timer
+        esp_common
+        esp_system
+        log
+        freertos
 )
 
 # Define FLOAT_APPROX as a compile definition (not just a flag)

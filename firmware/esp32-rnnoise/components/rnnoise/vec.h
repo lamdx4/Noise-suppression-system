@@ -182,12 +182,26 @@ static inline void sparse_sgemv8x4(float *out, const float *w, const int *idx, i
 }
 
 #ifdef USE_SU_BIAS
+
 static inline void sparse_cgemv8x4(float *out, const opus_int8 *w, const int *idx, const float *scale, int rows, int cols, const float *_x)
 {
    int i, j;
    unsigned char x[MAX_INPUTS];
    for (i=0;i<rows;i++) out[i] = 0;
-   for (i=0;i<cols;i++) x[i] = 127+floor(.5+127*_x[i]);
+   
+   // FIX: Use lrintf for hardware-accelerated rounding (Xtensa FPU)
+   // Step 3: Unroll quantization loop (4x)
+   int remainder = cols & 3;
+   for (i=0; i<cols-3; i+=4) {
+      x[i+0] = (unsigned char)(127 + lrintf(127.0f * _x[i+0]));
+      x[i+1] = (unsigned char)(127 + lrintf(127.0f * _x[i+1]));
+      x[i+2] = (unsigned char)(127 + lrintf(127.0f * _x[i+2]));
+      x[i+3] = (unsigned char)(127 + lrintf(127.0f * _x[i+3]));
+   }
+   for (; i<cols; i++) {
+       x[i] = (unsigned char)(127 + lrintf(127.0f * _x[i]));
+   }
+   
    for (i=0;i<rows;i+=8)
    {
       int colblocks;
@@ -251,65 +265,87 @@ static inline void sparse_cgemv8x4(float *out, const opus_int8 *w, const int *id
 {
    int i, j;
    opus_int8 x[MAX_INPUTS];
-   for (i=0;i<rows;i++) out[i] = 0;
-   for (i=0;i<cols;i++) x[i] = (int)floor(.5+127*_x[i]);
+   
+   // Quantization (Optimize with lrintf)
+   for (i=0;i<cols;i++) x[i] = (opus_int8)lrintf(127.0f * _x[i]);
+   
    for (i=0;i<rows;i+=8)
    {
       int colblocks;
+      int32_t acc[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+      
       colblocks = *idx++;
       for (j=0;j<colblocks;j++)
       {
          int pos;
-         float * restrict y;
          int xj0, xj1, xj2, xj3;
          pos = (*idx++);
          xj0 = x[pos+0];
          xj1 = x[pos+1];
          xj2 = x[pos+2];
          xj3 = x[pos+3];
-         y = &out[i];
-         y[0] += (w[0]*xj0+w[1]*xj1+w[2]*xj2+w[3]*xj3);
-         y[1] += (w[4]*xj0+w[5]*xj1+w[6]*xj2+w[7]*xj3);
-         y[2] += (w[8]*xj0+w[9]*xj1+w[10]*xj2+w[11]*xj3);
-         y[3] += (w[12]*xj0+w[13]*xj1+w[14]*xj2+w[15]*xj3);
-         y[4] += (w[16]*xj0+w[17]*xj1+w[18]*xj2+w[19]*xj3);
-         y[5] += (w[20]*xj0+w[21]*xj1+w[22]*xj2+w[23]*xj3);
-         y[6] += (w[24]*xj0+w[25]*xj1+w[26]*xj2+w[27]*xj3);
-         y[7] += (w[28]*xj0+w[29]*xj1+w[30]*xj2+w[31]*xj3);
+         
+         acc[0] += (w[0]*xj0+w[1]*xj1+w[2]*xj2+w[3]*xj3);
+         acc[1] += (w[4]*xj0+w[5]*xj1+w[6]*xj2+w[7]*xj3);
+         acc[2] += (w[8]*xj0+w[9]*xj1+w[10]*xj2+w[11]*xj3);
+         acc[3] += (w[12]*xj0+w[13]*xj1+w[14]*xj2+w[15]*xj3);
+         acc[4] += (w[16]*xj0+w[17]*xj1+w[18]*xj2+w[19]*xj3);
+         acc[5] += (w[20]*xj0+w[21]*xj1+w[22]*xj2+w[23]*xj3);
+         acc[6] += (w[24]*xj0+w[25]*xj1+w[26]*xj2+w[27]*xj3);
+         acc[7] += (w[28]*xj0+w[29]*xj1+w[30]*xj2+w[31]*xj3);
          w += 32;
       }
+      out[i+0] = (float)acc[0] * scale[i+0];
+      out[i+1] = (float)acc[1] * scale[i+1];
+      out[i+2] = (float)acc[2] * scale[i+2];
+      out[i+3] = (float)acc[3] * scale[i+3];
+      out[i+4] = (float)acc[4] * scale[i+4];
+      out[i+5] = (float)acc[5] * scale[i+5];
+      out[i+6] = (float)acc[6] * scale[i+6];
+      out[i+7] = (float)acc[7] * scale[i+7];
    }
-   for (i=0;i<rows;i++) out[i] *= scale[i];
 }
 static inline void cgemv8x4(float *out, const opus_int8 *w, const float *scale, int rows, int cols, const float *_x)
 {
    int i, j;
    opus_int8 x[MAX_INPUTS];
-   for (i=0;i<rows;i++) out[i] = 0;
-   for (i=0;i<cols;i++) x[i] = (int)floor(.5+127*_x[i]);
-   for (i=0;i<rows;i+=8)
+   
+   for (i=0; i<rows; i++) out[i] = 0;
+   
+   // Quantization
+   for (i=0; i<cols; i++) {
+      float tmp = _x[i] * 127.0f;
+      x[i] = (opus_int8)(tmp + (tmp >= 0 ? 0.5f : -0.5f));
+   }
+   
+   // INT32 accumulation
+   for (i=0; i<rows; i+=8)
    {
-      for (j=0;j<cols;j+=4)
+      int32_t acc[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+      
+      for (j=0; j<cols; j+=4)
       {
-         float *y;
-         float xj0, xj1, xj2, xj3;
-         xj0 = x[j+0];
-         xj1 = x[j+1];
-         xj2 = x[j+2];
-         xj3 = x[j+3];
-         y = &out[i];
-         y[0] += (w[0]*xj0+w[1]*xj1+w[2]*xj2+w[3]*xj3);
-         y[1] += (w[4]*xj0+w[5]*xj1+w[6]*xj2+w[7]*xj3);
-         y[2] += (w[8]*xj0+w[9]*xj1+w[10]*xj2+w[11]*xj3);
-         y[3] += (w[12]*xj0+w[13]*xj1+w[14]*xj2+w[15]*xj3);
-         y[4] += (w[16]*xj0+w[17]*xj1+w[18]*xj2+w[19]*xj3);
-         y[5] += (w[20]*xj0+w[21]*xj1+w[22]*xj2+w[23]*xj3);
-         y[6] += (w[24]*xj0+w[25]*xj1+w[26]*xj2+w[27]*xj3);
-         y[7] += (w[28]*xj0+w[29]*xj1+w[30]*xj2+w[31]*xj3);
+         int xj0 = x[j+0];
+         int xj1 = x[j+1];
+         int xj2 = x[j+2];
+         int xj3 = x[j+3];
+         
+         acc[0] += w[0]*xj0 + w[1]*xj1 + w[2]*xj2 + w[3]*xj3;
+         acc[1] += w[4]*xj0 + w[5]*xj1 + w[6]*xj2 + w[7]*xj3;
+         acc[2] += w[8]*xj0 + w[9]*xj1 + w[10]*xj2 + w[11]*xj3;
+         acc[3] += w[12]*xj0 + w[13]*xj1 + w[14]*xj2 + w[15]*xj3;
+         acc[4] += w[16]*xj0 + w[17]*xj1 + w[18]*xj2 + w[19]*xj3;
+         acc[5] += w[20]*xj0 + w[21]*xj1 + w[22]*xj2 + w[23]*xj3;
+         acc[6] += w[24]*xj0 + w[25]*xj1 + w[26]*xj2 + w[27]*xj3;
+         acc[7] += w[28]*xj0 + w[29]*xj1 + w[30]*xj2 + w[31]*xj3;
          w += 32;
       }
+      
+      // ✅ ĐÚNG: Chỉ nhân scale (đã bao gồm /127)
+      for (j=0; j<8; j++) {
+         out[i+j] = (float)acc[j] * scale[i+j];
+      }
    }
-   for (i=0;i<rows;i++) out[i] *= scale[i];
 }
 #endif
 
