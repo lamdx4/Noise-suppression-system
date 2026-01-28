@@ -29,6 +29,7 @@
 #ifndef VEC_H
 #define VEC_H
 
+#include <esp_attr.h>
 #include "opus_types.h"
 #include <math.h>
 #include "arch.h"
@@ -48,7 +49,7 @@
 
 #define NO_OPTIMIZATIONS
 
-static inline void sgemv16x1(float *out, const float *weights, int rows, int cols, int col_stride, const float *x)
+static inline IRAM_ATTR void sgemv16x1(float *out, const float *weights, int rows, int cols, int col_stride, const float *x)
 {
    int i, j;
    OPUS_CLEAR(out, rows);
@@ -82,7 +83,7 @@ static inline void sgemv16x1(float *out, const float *weights, int rows, int col
    }
 }
 
-static inline void sgemv8x1(float *out, const float *weights, int rows, int cols, int col_stride, const float *x)
+static inline IRAM_ATTR void sgemv8x1(float *out, const float *weights, int rows, int cols, int col_stride, const float *x)
 {
    int i, j;
    OPUS_CLEAR(out, rows);
@@ -108,7 +109,7 @@ static inline void sgemv8x1(float *out, const float *weights, int rows, int cols
    }
 }
 
-static inline void sgemv(float *out, const float *weights, int rows, int cols, int col_stride, const float *x)
+static inline IRAM_ATTR void sgemv(float *out, const float *weights, int rows, int cols, int col_stride, const float *x)
 {
    if ((rows&0xf) == 0) sgemv16x1(out, weights, rows, cols, col_stride, x);
    else if ((rows&0x7) == 0) sgemv8x1(out, weights, rows, cols, col_stride, x);
@@ -122,7 +123,7 @@ static inline void sgemv(float *out, const float *weights, int rows, int cols, i
    }
 }
 
-static inline void sparse_sgemv8x4(float *out, const float *w, const int *idx, int rows, const float *x)
+static inline IRAM_ATTR void sparse_sgemv8x4(float *out, const float *w, const int *idx, int rows, const float *x)
 {
    int i, j;
    OPUS_CLEAR(out, rows);
@@ -183,7 +184,7 @@ static inline void sparse_sgemv8x4(float *out, const float *w, const int *idx, i
 
 #ifdef USE_SU_BIAS
 
-static inline void sparse_cgemv8x4(float *out, const opus_int8 *w, const int *idx, const float *scale, int rows, int cols, const float *_x)
+static inline IRAM_ATTR void sparse_cgemv8x4(float *out, const opus_int8 *w, const int *idx, const float *scale, int rows, int cols, const float *_x)
 {
    int i, j;
    unsigned char x[MAX_INPUTS];
@@ -230,7 +231,7 @@ static inline void sparse_cgemv8x4(float *out, const opus_int8 *w, const int *id
    }
    for (i=0;i<rows;i++) out[i] *= scale[i];
 }
-static inline void cgemv8x4(float *out, const opus_int8 *w, const float *scale, int rows, int cols, const float *_x)
+static inline IRAM_ATTR void cgemv8x4(float *out, const opus_int8 *w, const float *scale, int rows, int cols, const float *_x)
 {
    int i, j;
    unsigned char x[MAX_INPUTS];
@@ -261,7 +262,7 @@ static inline void cgemv8x4(float *out, const opus_int8 *w, const float *scale, 
    for (i=0;i<rows;i++) out[i] *= scale[i];
 }
 #else
-static inline void sparse_cgemv8x4(float *out, const opus_int8 *w, const int *idx, const float *scale, int rows, int cols, const float *_x)
+static inline IRAM_ATTR void sparse_cgemv8x4(float *out, const opus_int8 *w, const int *idx, const float *scale, int rows, int cols, const float *_x)
 {
    int i, j;
    opus_int8 x[MAX_INPUTS];

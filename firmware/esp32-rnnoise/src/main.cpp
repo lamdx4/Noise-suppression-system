@@ -318,7 +318,15 @@ extern "C" void app_main(void)
   }
   ESP_ERROR_CHECK(ret);
 
-  ESP_LOGI(TAG, "Starting Audio Streamer (RNNoise + Task Version)...");
+  // 0. Check PSRAM availability
+  ESP_LOGI(TAG, "System Startup. Checking PSRAM...");
+  size_t psram_free = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+  size_t internal_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+  ESP_LOGI(TAG, "Free PSRAM: %d bytes, Internal: %d bytes", (int)psram_free, (int)internal_free);
+
+  if (psram_free < 1200000) {
+      ESP_LOGE(TAG, "CRITICAL: Not enough PSRAM for model! (Found %d, Need ~1150 KB)", (int)psram_free);
+  }
 
   // 1. Connect to Wi-Fi
   wifi_init_sta();

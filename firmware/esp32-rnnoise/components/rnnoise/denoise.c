@@ -35,12 +35,14 @@
 #include "cpu_support.h"
 #include "denoise.h"
 #include "esp_timer.h"
-#include "esp_timer.h" // For profiling
 #include "kiss_fft.h"
 #include "pitch.h"
 #include "rnn.h"
 #include "rnnoise.h"
 #include <esp_attr.h>
+#include <esp_heap_caps.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -281,6 +283,55 @@ int rnnoise_get_size() { return sizeof(DenoiseState); }
 
 int rnnoise_get_frame_size() { return FRAME_SIZE; }
 
+static WeightArray *load_rnnoise_model_to_psram(const WeightArray *arrays) {
+  int i = 0;
+  int count = 0;
+  while (arrays[count].name != NULL)
+    count++;
+
+  printf("[RNNoise] Migrating %d arrays to PSRAM...\n", count);
+
+  WeightArray *psram_arrays = heap_caps_malloc(
+      (count + 1) * sizeof(WeightArray), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!psram_arrays) {
+    printf(
+        "[RNNoise] Error: Failed to allocate PSRAM for WeightArray header\n");
+    return NULL;
+  }
+
+  for (i = 0; i < count; i++) {
+    psram_arrays[i].name = arrays[i].name;
+    psram_arrays[i].type = arrays[i].type;
+    psram_arrays[i].size = arrays[i].size;
+
+    void *data =
+        heap_caps_malloc(arrays[i].size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!data) {
+      printf("[RNNoise] Error: Failed to allocate %d bytes in PSRAM for '%s'\n",
+             arrays[i].size, arrays[i].name);
+      for (int j = 0; j < i; j++)
+        free((void *)psram_arrays[j].data);
+      free(psram_arrays);
+      return NULL;
+    }
+
+    printf("[RNNoise] Loading %-25s (%6d bytes)... ", arrays[i].name,
+           arrays[i].size);
+    memcpy(data, arrays[i].data, arrays[i].size);
+    psram_arrays[i].data = data;
+    printf("Done\n");
+
+    // Feed Watchdog/Yield every 4 arrays to prevent WDT timeout
+    if ((i % 4) == 0)
+      vTaskDelay(1);
+  }
+  psram_arrays[count].name = NULL;
+  psram_arrays[count].data = NULL;
+
+  printf("[RNNoise] PSRAM Migration Complete. Total Weights: ~1.1MB\n");
+  return psram_arrays;
+}
+
 int rnnoise_init(DenoiseState *st, RNNModel *model) {
   memset(st, 0, sizeof(*st));
 #if !TRAINING
@@ -298,7 +349,15 @@ int rnnoise_init(DenoiseState *st, RNNModel *model) {
   }
 #ifndef USE_WEIGHTS_FILE
   else {
-    int ret = init_rnnoise(&st->model, rnnoise_arrays);
+    static WeightArray *psram_arrays = NULL;
+    static int migration_done = 0;
+    if (psram_arrays == NULL && migration_done == 0) {
+      migration_done = 1;
+      psram_arrays = load_rnnoise_model_to_psram(rnnoise_arrays);
+    }
+
+    int ret =
+        init_rnnoise(&st->model, psram_arrays ? psram_arrays : rnnoise_arrays);
     if (ret != 0)
       return -1;
   }
@@ -467,8 +526,7 @@ void rnn_pitch_filter(kiss_fft_cpx *X, const kiss_fft_cpx *P, const float *Ex,
   }
 }
 
-float IRAM_ATTR rnnoise_process_frame(DenoiseState *st, float *out,
-                                      const float *in) {
+float rnnoise_process_frame(DenoiseState *st, float *out, const float *in) {
   int i;
   kiss_fft_cpx X[FREQ_SIZE];
   kiss_fft_cpx P[FREQ_SIZE];
@@ -499,7 +557,8 @@ float IRAM_ATTR rnnoise_process_frame(DenoiseState *st, float *out,
     int64_t t_model_start = esp_timer_get_time();
     compute_rnn(&st->model, &st->rnn, g, &vad_prob, features, st->arch);
     int64_t t_model_end = esp_timer_get_time();
-    // printf("[PROFILE] Model Inference: %lld us\n", t_model_end - t_model_start);
+    // printf("[PROFILE] Model Inference: %lld us\n", t_model_end -
+    // t_model_start);
 #endif
     rnn_pitch_filter(st->delayed_X, st->delayed_P, st->delayed_Ex,
                      st->delayed_Ep, st->delayed_Exp, g);

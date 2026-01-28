@@ -76,7 +76,7 @@ static OPUS_INLINE float relu(float x)
 
 /*#define HIGH_ACCURACY */
 
-void RTCD_SUF(compute_activation_)(float *output, const float *input, int N, int activation)
+IRAM_ATTR void RTCD_SUF(compute_activation_)(float *output, const float *input, int N, int activation)
 {
    int i;
    if (activation == ACTIVATION_SIGMOID)
@@ -139,7 +139,7 @@ void RTCD_SUF(compute_activation_)(float *output, const float *input, int N, int
    }
 }
 
-void RTCD_SUF(compute_linear_)(const LinearLayer *linear, float *out, const float *in)
+IRAM_ATTR void RTCD_SUF(compute_linear_)(const LinearLayer *linear, float *out, const float *in)
 {
    int i, M, N;
    const float *bias;
