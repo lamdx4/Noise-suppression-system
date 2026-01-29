@@ -255,21 +255,13 @@ void udp_audio_task(void *pvParameters)
 
         static int frame_count = 0;
         if (++frame_count % 100 == 0) {
-            ESP_LOGI(TAG, "RNNoise: %llu us/frame, Heap: %lu, CPU: %lu MHz", 
-                     rnn_elapsed, (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+            ESP_LOGI(TAG, "Heap Internal (v2): %lu, CPU: %lu MHz", 
+                     (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
                      (unsigned long)esp_clk_cpu_freq() / 1000000);
         }
 
         // Step 3: Convert float → int16
         convert_float_to_int16(output_buffer, buffer16, samples_mono);
-
-        // Log performance periodically
-        static int perf_counter = 0;
-        if (perf_counter++ % 100 == 0)
-        {
-          ESP_LOGI(TAG, "RNNoise: %llu us/frame, Heap: %d",
-                   rnn_elapsed, esp_get_free_heap_size());
-        }
       }
       else if (samples_mono != 480)
       {

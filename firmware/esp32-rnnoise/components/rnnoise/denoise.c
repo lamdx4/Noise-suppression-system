@@ -116,6 +116,14 @@ static void compute_band_energy(float *bandE, const kiss_fft_cpx *X) {
   }
 }
 
+// Profiling metrics (internal waterfall)
+static int64_t g_prof_biquad_us = 0;
+static int64_t g_prof_analysis_us = 0;
+static int64_t g_prof_pitch_us = 0;
+static int64_t g_prof_rnn_us = 0;
+static int64_t g_prof_pfilter_us = 0;
+static int64_t g_prof_synth_us = 0;
+
 static void compute_band_corr(float *bandE, const kiss_fft_cpx *X,
                               const kiss_fft_cpx *P) {
   int i;
@@ -220,7 +228,7 @@ static void inverse_transform(float *out, const kiss_fft_cpx *in) {
   }
 }
 
-static void apply_window(float *x) {
+static IRAM_ATTR void apply_window(float *x) {
   int i;
   for (i = 0; i < FRAME_SIZE; i++) {
     x[i] *= rnn_half_window[i];
@@ -417,7 +425,13 @@ int rnn_compute_frame_features(DenoiseState *st, kiss_fft_cpx *X,
   float gain;
   float *(pre[1]);
   float follow, logMax;
+
+  int64_t t_analysis_start = esp_timer_get_time();
   rnn_frame_analysis(st, X, Ex, in);
+  int64_t t_analysis_end = esp_timer_get_time();
+  g_prof_analysis_us = t_analysis_end - t_analysis_start;
+
+  int64_t t_pitch_start = esp_timer_get_time();
   RNN_MOVE(st->pitch_buf, &st->pitch_buf[FRAME_SIZE],
            PITCH_BUF_SIZE - FRAME_SIZE);
   RNN_COPY(&st->pitch_buf[PITCH_BUF_SIZE - FRAME_SIZE], in, FRAME_SIZE);
@@ -431,6 +445,9 @@ int rnn_compute_frame_features(DenoiseState *st, kiss_fft_cpx *X,
   gain = rnn_remove_doubling(pitch_buf, PITCH_MAX_PERIOD, PITCH_MIN_PERIOD,
                              PITCH_FRAME_SIZE, &pitch_index, st->last_period,
                              st->last_gain);
+  int64_t t_pitch_end = esp_timer_get_time();
+  g_prof_pitch_us = t_pitch_end - t_pitch_start;
+
   st->last_period = pitch_index;
   st->last_gain = gain;
   for (i = 0; i < WINDOW_SIZE; i++)
@@ -463,8 +480,8 @@ int rnn_compute_frame_features(DenoiseState *st, kiss_fft_cpx *X,
   return TRAINING && E < 0.1;
 }
 
-static void frame_synthesis(DenoiseState *st, float *out,
-                            const kiss_fft_cpx *y) {
+static IRAM_ATTR void frame_synthesis(DenoiseState *st, float *out,
+                                      const kiss_fft_cpx *y) {
   float x[WINDOW_SIZE];
   int i;
   inverse_transform(x, y);
@@ -474,15 +491,14 @@ static void frame_synthesis(DenoiseState *st, float *out,
   RNN_COPY(st->synthesis_mem, &x[FRAME_SIZE], FRAME_SIZE);
 }
 
-void rnn_biquad(float *y, float mem[2], const float *x, const float *b,
-                const float *a, int N) {
+IRAM_ATTR void rnn_biquad(float *y, float mem[2], const float *x,
+                          const float *b, const float *a, int N) {
   int i;
   for (i = 0; i < N; i++) {
-    float xi, yi;
-    xi = x[i];
-    yi = x[i] + mem[0];
-    mem[0] = mem[1] + (b[0] * (double)xi - a[0] * (double)yi);
-    mem[1] = (b[1] * (double)xi - a[1] * (double)yi);
+    float xi = x[i];
+    float yi = xi + mem[0];
+    mem[0] = mem[1] + (b[0] * xi - a[0] * yi);
+    mem[1] = (b[1] * xi - a[1] * yi);
     y[i] = yi;
   }
 }
@@ -541,25 +557,27 @@ float rnnoise_process_frame(DenoiseState *st, float *out, const float *in) {
   static const float a_hp[2] = {-1.99599, 0.99600};
   static const float b_hp[2] = {-2, 1};
 
-  // === PROFILING: Stage 1 - Preprocessing ===
-  int64_t t_preprocess_start = esp_timer_get_time();
+  // === PROFILING: Stage 1 - Preprocessing (Outer) ===
+  int64_t t_biquad_start = esp_timer_get_time();
   rnn_biquad(x, st->mem_hp_x, in, b_hp, a_hp, FRAME_SIZE);
-  silence = rnn_compute_frame_features(st, X, P, Ex, Ep, Exp, features, x);
-  int64_t t_preprocess_end = esp_timer_get_time();
-  // printf("[PROFILE] Preprocessing: %lld us\n",
-  //        t_preprocess_end - t_preprocess_start);
+  int64_t t_biquad_end = esp_timer_get_time();
+  g_prof_biquad_us = t_biquad_end - t_biquad_start;
 
-  // === PROFILING: Stage 3 - Postprocessing ===
-  int64_t t_postprocess_start = esp_timer_get_time();
+  silence = rnn_compute_frame_features(st, X, P, Ex, Ep, Exp, features, x);
+
+  // === PROFILING: Stage 2 - Model Inference ===
   if (!silence) {
 #if !TRAINING
-    // === PROFILING: Stage 2 - Model Inference ===
-    int64_t t_model_start = esp_timer_get_time();
+    int64_t t_rnn_start = esp_timer_get_time();
     compute_rnn(&st->model, &st->rnn, g, &vad_prob, features, st->arch);
-    int64_t t_model_end = esp_timer_get_time();
-    // printf("[PROFILE] Model Inference: %lld us\n", t_model_end -
-    // t_model_start);
+    int64_t t_rnn_end = esp_timer_get_time();
+    g_prof_rnn_us = t_rnn_end - t_rnn_start;
+#else
+    g_prof_rnn_us = 0;
 #endif
+
+    // === PROFILING: Stage 3 - Postprocessing (Part 1: Pitch Filter & Gain) ===
+    int64_t t_pfilter_start = esp_timer_get_time();
     rnn_pitch_filter(st->delayed_X, st->delayed_P, st->delayed_Ex,
                      st->delayed_Ep, st->delayed_Exp, g);
     for (i = 0; i < NB_BANDS; i++) {
@@ -568,17 +586,33 @@ float rnnoise_process_frame(DenoiseState *st, float *out, const float *in) {
       st->lastg[i] = g[i];
     }
     interp_band_gain(gf, g);
-#if 1
     for (i = 0; i < FREQ_SIZE; i++) {
       st->delayed_X[i].r *= gf[i];
       st->delayed_X[i].i *= gf[i];
     }
-#endif
+    int64_t t_pfilter_end = esp_timer_get_time();
+    g_prof_pfilter_us = t_pfilter_end - t_pfilter_start;
+  } else {
+    g_prof_rnn_us = 0;
+    g_prof_pfilter_us = 0;
   }
+
+  // === PROFILING: Stage 3 - Postprocessing (Part 2: Synthesis) ===
+  int64_t t_synth_start = esp_timer_get_time();
   frame_synthesis(st, out, st->delayed_X);
-  int64_t t_postprocess_end = esp_timer_get_time();
-  // printf("[PROFILE] Postprocessing: %lld us\n",
-  //        t_postprocess_end - t_postprocess_start);
+  int64_t t_synth_end = esp_timer_get_time();
+  g_prof_synth_us = t_synth_end - t_synth_start;
+
+  static int frame_count = 0;
+  if (++frame_count % 100 == 0) {
+    int64_t t_total = g_prof_biquad_us + g_prof_analysis_us + g_prof_pitch_us +
+                      g_prof_rnn_us + g_prof_pfilter_us + g_prof_synth_us;
+    printf("[PROF v2 - RELOADED] Total: %lld | BQ: %lld | Any: %lld | Pitch: "
+           "%lld | RNN: "
+           "%lld | PFilt: %lld | Synth: %lld us\n",
+           t_total, g_prof_biquad_us, g_prof_analysis_us, g_prof_pitch_us,
+           g_prof_rnn_us, g_prof_pfilter_us, g_prof_synth_us);
+  }
 
   RNN_COPY(st->delayed_X, X, FREQ_SIZE);
   RNN_COPY(st->delayed_P, P, FREQ_SIZE);
