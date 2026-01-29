@@ -18,6 +18,7 @@ idf_component_register(
         esp_system
         log
         freertos
+    REQUIRES esp_mm esp_hw_support heap
 )
 
 # Define FLOAT_APPROX as a compile definition (not just a flag)
