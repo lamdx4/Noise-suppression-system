@@ -13,6 +13,11 @@
 #include "lwip/sys.h"
 #include "nvs_flash.h"
 #include <string.h>
+#include "esp_private/esp_clk.h"
+#include "esp_pm.h"
+#include "soc/rtc.h"
+#include "esp_rom_sys.h"
+#include "esp_chip_info.h"
 
 #include "constants/i2s_config_t.h"
 // RNNoise includes
@@ -248,6 +253,13 @@ void udp_audio_task(void *pvParameters)
         rnnoise_process_frame(rnn_state, output_buffer, input_buffer);
         uint64_t rnn_elapsed = esp_timer_get_time() - rnn_start;
 
+        static int frame_count = 0;
+        if (++frame_count % 100 == 0) {
+            ESP_LOGI(TAG, "RNNoise: %llu us/frame, Heap: %lu, CPU: %lu MHz", 
+                     rnn_elapsed, (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                     (unsigned long)esp_clk_cpu_freq() / 1000000);
+        }
+
         // Step 3: Convert float → int16
         convert_float_to_int16(output_buffer, buffer16, samples_mono);
 
@@ -309,6 +321,40 @@ void udp_audio_task(void *pvParameters)
 
 extern "C" void app_main(void)
 {
+  // 1. THE NUCLEAR OPTION: Direct RTC Clock Override
+  rtc_cpu_freq_config_t rtc_conf;
+  rtc_clk_cpu_freq_mhz_to_config(240, &rtc_conf);
+  rtc_clk_cpu_freq_set_config(&rtc_conf);
+  
+  // 2. Power Management Enforcement (Safeguard)
+#ifdef CONFIG_PM_ENABLE
+  esp_pm_config_esp32s3_t pm_config = {
+      .max_freq_mhz = 240,
+      .min_freq_mhz = 240,
+      .light_sleep_enable = false
+  };
+  esp_err_t pm_err = esp_pm_configure(&pm_config);
+  if (pm_err != ESP_OK) {
+      ESP_LOGE("STARTUP", "esp_pm_configure failed (0x%x). Frequency might be capped!", pm_err);
+  } else {
+      ESP_LOGI("STARTUP", "esp_pm_configure SUCCESS (Target: 240MHz)");
+  }
+#else
+  ESP_LOGW("STARTUP", "CONFIG_PM_ENABLE NOT set. Using RTC fallback.");
+#endif
+
+  // 3. System Diagnostics
+  esp_chip_info_t chip_info;
+  esp_chip_info(&chip_info);
+  ESP_LOGI("STARTUP", "CPU: %s, Cores: %d, Rev: %d", (chip_info.model == CHIP_ESP32S3 ? "ESP32-S3" : "Unknown"), chip_info.cores, chip_info.revision);
+  ESP_LOGI("STARTUP", "Running Frequency: %lu MHz", (unsigned long)esp_clk_cpu_freq() / 1000000);
+  
+#ifdef USE_SU_BIAS
+  ESP_LOGI("STARTUP", "Optimization Path: USE_SU_BIAS (Extreme Scalar)");
+#else
+  ESP_LOGW("STARTUP", "Optimization Path: STANDARD C (Slow)");
+#endif
+
   esp_err_t ret = nvs_flash_init();
   if (ret == ESP_ERR_NVS_NO_FREE_PAGES ||
       ret == ESP_ERR_NVS_NEW_VERSION_FOUND)
