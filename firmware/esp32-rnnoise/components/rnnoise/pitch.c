@@ -40,8 +40,8 @@
 #include "denoise.h"
 #include "math.h"
 #include "pitch.h"
+#include "pitch_opt_pie.h"
 #include <esp_attr.h>
-
 
 static IRAM_ATTR void find_best_pitch(opus_val32 *xcorr, opus_val16 *y, int len,
                                       int max_pitch, int *best_pitch
@@ -205,7 +205,10 @@ void rnn_pitch_downsample(celt_sig *x[], opus_val16 *x_lp, int len, int C) {
 
 void rnn_pitch_xcorr(const opus_val16 *_x, const opus_val16 *_y,
                      opus_val32 *xcorr, int len, int max_pitch) {
-
+#ifdef OPUS_HAVE_PIE
+  // Use Optimized PIE Implementation
+  compute_pitch_xcorr_pie_magic(_x, _y, xcorr, len, max_pitch);
+#else
 #if 0 /* This is a simple version of the pitch correlation that should work    \
          well on DSPs like Blackfin and TI C5x/C6x */
    int i, j;
@@ -262,6 +265,7 @@ void rnn_pitch_xcorr(const opus_val16 *_x, const opus_val16 *_y,
   }
 #ifdef FIXED_POINT
   return maxcorr;
+#endif
 #endif
 #endif
 }

@@ -10,6 +10,8 @@ idf_component_register(
         "parse_lpcnet_weights.c"
         "rnnoise_data.c"
         "rnnoise_tables.c"
+        "pitch_opt_pie.c"
+        "pitch_opt_pie_asm.S"
     INCLUDE_DIRS
         "."
     PRIV_REQUIRES
@@ -25,6 +27,7 @@ idf_component_register(
 target_compile_definitions(${COMPONENT_LIB} PRIVATE
     FLOAT_APPROX=1
     OPUS_HAVE_RTCD=0
+    OPUS_HAVE_PIE=1     # Manually activate PIE optimizations
     CPU_INFO_BY_C=0
     OPUS_X86_MAY_HAVE_SSE=0
     OPUS_X86_MAY_HAVE_SSE2=0

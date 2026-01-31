@@ -7,7 +7,7 @@ import os
 # Configuration
 UDP_IP = "0.0.0.0"  # Listen on all interfaces
 UDP_PORT = 12345    # Must match ESP32 target port
-DURATION = 10       # Recording duration in seconds
+DURATION = 10       # Target recording duration in seconds
 OUTPUT_FILE = "recorded_rnnoise_output.wav"
 
 # Audio Format (Standard RNNoise / ESP32 I2S settings)
@@ -16,12 +16,17 @@ CHANNELS = 1
 SAMPLE_WIDTH = 2  # 16-bit = 2 bytes
 
 def main():
-    print(f"--- UDP Audio Recorder Tool ---")
+    expected_bytes = SAMPLE_RATE * CHANNELS * SAMPLE_WIDTH * DURATION
+    
+    print(f"--- UDP Audio Recorder Tool (Byte-Exact Mode) ---")
     print(f"Listening on {UDP_IP}:{UDP_PORT}")
     print(f"Format: {SAMPLE_RATE}Hz, {CHANNELS} Channel, 16-bit PCM")
-    print(f"Target Duration: {DURATION} seconds")
+    print(f"Target Duration: {DURATION} seconds ({expected_bytes} bytes)")
     
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    # Increase socket buffer size to prevent dropping packets
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024 * 1024) 
+    
     try:
         sock.bind((UDP_IP, UDP_PORT))
     except Exception as e:
@@ -30,9 +35,10 @@ def main():
 
     frames = []
     
-    print("\n[Waiting for data...]")
+    print("\n[Waiting for first packet...]")
     
-    # Wait for first packet to start timer
+    # Wait for first packet to start session
+    sock.settimeout(None) # Wait indefinitely for the first packet
     data, addr = sock.recvfrom(4096)
     frames.append(data)
     print(f"[Started] Receiving from {addr}")
@@ -41,29 +47,30 @@ def main():
     packet_count = 1
     total_bytes = len(data)
 
-    while True:
-        elapsed = time.time() - start_time
-        if elapsed >= DURATION:
-            break
-            
+    while total_bytes < expected_bytes:
         try:
-            sock.settimeout(1.0) # Timeout if stream stops
+            # Short timeout to detect if streams stops completely
+            sock.settimeout(2.0) 
             data, _ = sock.recvfrom(4096)
             frames.append(data)
             packet_count += 1
             total_bytes += len(data)
             
             # Progress indicator
-            if packet_count % 50 == 0:
-                print(f"\rRecording... {elapsed:.1f}s / {DURATION}s ({packet_count} packets)", end="")
+            if packet_count % 20 == 0:
+                percent = (total_bytes / expected_bytes) * 100
+                elapsed = time.time() - start_time
+                print(f"\rProgress: {percent:.1f}% | Bytes: {total_bytes}/{expected_bytes} | Time: {elapsed:.1f}s", end="")
+        
         except socket.timeout:
-            print("\n[Timeout] Stream stopped sending data.")
+            print("\n[Timeout] No data for 2 seconds. Ending early.")
             break
         except KeyboardInterrupt:
             print("\n[Stopped] User interrupted.")
             break
 
-    print(f"\n\nDone! Captured {packet_count} packets ({total_bytes} bytes).")
+    total_duration = total_bytes / (SAMPLE_RATE * CHANNELS * SAMPLE_WIDTH)
+    print(f"\n\nDone! Captured {total_bytes} bytes (~{total_duration:.2f}s of audio).")
     
     # Save to WAV
     try:
@@ -73,9 +80,6 @@ def main():
             wf.setframerate(SAMPLE_RATE)
             wf.writeframes(b"".join(frames))
         print(f"Successfully saved to: {os.path.abspath(OUTPUT_FILE)}")
-        print("\nAnalyze this file to check:")
-        print("1. If audio sounds clear but slow/choppy -> Real-time Latency issue (Underrun).")
-        print("2. If audio sounds strictly noise/static -> Decoding/Endianness issue.")
     except Exception as e:
         print(f"Error saving WAV file: {e}")
 

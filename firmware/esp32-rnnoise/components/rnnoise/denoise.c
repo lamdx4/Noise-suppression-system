@@ -34,6 +34,8 @@
 #include "common.h"
 #include "cpu_support.h"
 #include "denoise.h"
+#include "esp_cache.h"
+#include "esp_heap_caps.h"
 #include "esp_timer.h"
 #include "kiss_fft.h"
 #include "pitch.h"
@@ -48,9 +50,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "esp_cache.h"
-#include "esp_heap_caps.h"
-
 
 #define SQUARE(x) ((x) * (x))
 
@@ -294,117 +293,111 @@ int rnnoise_get_size() { return sizeof(DenoiseState); }
 
 int rnnoise_get_frame_size() { return FRAME_SIZE; }
 
-
-
 // Cache line size cho ESP32-S3: 32 bytes
 #define CACHE_LINE_SIZE 32
 
 // Macro để align lên cache line
 #define ALIGN_UP(size, align) (((size) + (align) - 1) & ~((align) - 1))
 
-static WeightArray *load_rnnoise_model_to_psram_optimized(const WeightArray *arrays) {
-    int count = 0;
-    while (arrays[count].name != NULL) count++;
-    
-    printf("[RNNoise] Migrating %d arrays to PSRAM...\n", count);
-    
-    // ========== 1. ALLOCATE ALIGNED HEADER ==========
-    // Header cần được căn chỉnh cache line
-    size_t header_size = (count + 1) * sizeof(WeightArray);
-    size_t aligned_header_size = ALIGN_UP(header_size, CACHE_LINE_SIZE);
-    
-    WeightArray *psram_arrays = (WeightArray *)heap_caps_aligned_alloc(
-        CACHE_LINE_SIZE,                     // Alignment 32 bytes
-        aligned_header_size,                 // Size đã align
-        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
-    );
-    
-    if (!psram_arrays) {
-        printf("[RNNoise] ❌ Failed to allocate PSRAM for header (%zu bytes)\n", aligned_header_size);
-        return NULL;
+static WeightArray *
+load_rnnoise_model_to_psram_optimized(const WeightArray *arrays) {
+  int count = 0;
+  while (arrays[count].name != NULL)
+    count++;
+
+  printf("[RNNoise] Migrating %d arrays to PSRAM...\n", count);
+
+  // ========== 1. ALLOCATE ALIGNED HEADER ==========
+  // Header cần được căn chỉnh cache line
+  size_t header_size = (count + 1) * sizeof(WeightArray);
+  size_t aligned_header_size = ALIGN_UP(header_size, CACHE_LINE_SIZE);
+
+  WeightArray *psram_arrays = (WeightArray *)heap_caps_aligned_alloc(
+      CACHE_LINE_SIZE,     // Alignment 32 bytes
+      aligned_header_size, // Size đã align
+      MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+
+  if (!psram_arrays) {
+    printf("[RNNoise] ❌ Failed to allocate PSRAM for header (%zu bytes)\n",
+           aligned_header_size);
+    return NULL;
+  }
+
+  // Zero-initialize header
+  memset(psram_arrays, 0, aligned_header_size);
+
+  // ========== 2. PROCESS EACH WEIGHT ARRAY ==========
+  for (int i = 0; i < count; i++) {
+    psram_arrays[i].name = arrays[i].name;
+    psram_arrays[i].type = arrays[i].type;
+
+    // Tính aligned size cho PIE (16 bytes) và cache line (32 bytes)
+    // PIE yêu cầu 16-byte alignment, cache yêu cầu 32-byte
+    size_t aligned_size = ALIGN_UP(arrays[i].size, CACHE_LINE_SIZE);
+
+    // Đảm bảo alignment tối thiểu 32 bytes cho cache
+    void *data = heap_caps_aligned_alloc(CACHE_LINE_SIZE, // 32-byte alignment
+                                         aligned_size,
+                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+
+    if (!data) {
+      printf("[RNNoise] ❌ Failed to allocate %zu bytes for '%s'\n",
+             aligned_size, arrays[i].name);
+
+      // Cleanup: free all previously allocated arrays
+      for (int j = 0; j < i; j++) {
+        heap_caps_free((void *)psram_arrays[j].data);
+      }
+      heap_caps_free(psram_arrays);
+      return NULL;
     }
-    
-    // Zero-initialize header
-    memset(psram_arrays, 0, aligned_header_size);
-    
-    // ========== 2. PROCESS EACH WEIGHT ARRAY ==========
-    for (int i = 0; i < count; i++) {
-        psram_arrays[i].name = arrays[i].name;
-        psram_arrays[i].type = arrays[i].type;
-        
-        // Tính aligned size cho PIE (16 bytes) và cache line (32 bytes)
-        // PIE yêu cầu 16-byte alignment, cache yêu cầu 32-byte
-        size_t aligned_size = ALIGN_UP(arrays[i].size, CACHE_LINE_SIZE);
-        
-        // Đảm bảo alignment tối thiểu 32 bytes cho cache
-        void *data = heap_caps_aligned_alloc(
-            CACHE_LINE_SIZE,                 // 32-byte alignment
-            aligned_size,
-            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
-        );
-        
-        if (!data) {
-            printf("[RNNoise] ❌ Failed to allocate %zu bytes for '%s'\n", 
-                   aligned_size, arrays[i].name);
-            
-            // Cleanup: free all previously allocated arrays
-            for (int j = 0; j < i; j++) {
-                heap_caps_free((void *)psram_arrays[j].data);
-            }
-            heap_caps_free(psram_arrays);
-            return NULL;
-        }
-        
-        // Zero-initialize để tránh data corruption
-        memset(data, 0, aligned_size);
-        
-        printf("[RNNoise] Loading %-25s (orig: %6d, aligned: %6zu)... ", 
-               arrays[i].name, arrays[i].size, aligned_size);
-        
-        // ========== 3. CRITICAL: COPY DATA WITH PROPER ORDER ==========
-        // Memcpy có thể được CPU cache tối ưu, nhưng với PSRAM cần cẩn thận
-        memcpy(data, arrays[i].data, arrays[i].size);
-        psram_arrays[i].data = (const void *)data;
-        psram_arrays[i].size = arrays[i].size;  // Lưu original size
-        
-        // ========== 4. CACHE COHERENCY: SYNC WITH ESP_CACHE_MSYNC ==========
-        // Cờ QUAN TRỌNG: 
-        // - DIRTY: đẩy dữ liệu từ cache xuống RAM
-        // - INVALIDATE: xóa cache, đảm bảo lần đọc sau lấy từ RAM
-        esp_err_t err = esp_cache_msync(
-            data, 
-            aligned_size,                     // Dùng aligned size
-            ESP_CACHE_MSYNC_FLAG_DIR_C2M  | ESP_CACHE_MSYNC_FLAG_INVALIDATE
-        );
-        
-        if (err != ESP_OK) {
-            printf("❌ Cache sync failed (err=%d)! ", err);
-        } else {
-            printf("✅");
-        }
-        printf("\n");
-        
-        // ========== 5. WATCHDOG & TASK YIELD ==========
-        // Mỗi 2 arrays yield một lần để tránh watchdog timeout
-        if ((i % 2) == 1) {
-            vTaskDelay(1);  // Yield cho watchdog
-        }
+
+    // Zero-initialize để tránh data corruption
+    memset(data, 0, aligned_size);
+
+    printf("[RNNoise] Loading %-25s (orig: %6d, aligned: %6zu)... ",
+           arrays[i].name, arrays[i].size, aligned_size);
+
+    // ========== 3. CRITICAL: COPY DATA WITH PROPER ORDER ==========
+    // Memcpy có thể được CPU cache tối ưu, nhưng với PSRAM cần cẩn thận
+    memcpy(data, arrays[i].data, arrays[i].size);
+    psram_arrays[i].data = (const void *)data;
+    psram_arrays[i].size = arrays[i].size; // Lưu original size
+
+    // ========== 4. CACHE COHERENCY: SYNC WITH ESP_CACHE_MSYNC ==========
+    // Cờ QUAN TRỌNG:
+    // - DIRTY: đẩy dữ liệu từ cache xuống RAM
+    // - INVALIDATE: xóa cache, đảm bảo lần đọc sau lấy từ RAM
+    esp_err_t err = esp_cache_msync(data,
+                                    aligned_size, // Dùng aligned size
+                                    ESP_CACHE_MSYNC_FLAG_DIR_C2M |
+                                        ESP_CACHE_MSYNC_FLAG_INVALIDATE);
+
+    if (err != ESP_OK) {
+      printf("❌ Cache sync failed (err=%d)! ", err);
+    } else {
+      printf("✅");
     }
-    
-    // Terminator
-    psram_arrays[count].name = NULL;
-    psram_arrays[count].data = NULL;
-    
-    // ========== 6. FINAL CACHE SYNC FOR HEADER ==========
-    // Sync header để đảm bảo metadata consistency
-    esp_cache_msync(
-        psram_arrays,
-        aligned_header_size,
-        ESP_CACHE_MSYNC_FLAG_DIR_C2M 
-    );
-    
-    printf("[RNNoise] ✅ PSRAM Migration Complete. %d arrays loaded.\n", count);
-    return psram_arrays;
+    printf("\n");
+
+    // ========== 5. WATCHDOG & TASK YIELD ==========
+    // Mỗi 2 arrays yield một lần để tránh watchdog timeout
+    if ((i % 2) == 1) {
+      vTaskDelay(1); // Yield cho watchdog
+    }
+  }
+
+  // Terminator
+  psram_arrays[count].name = NULL;
+  psram_arrays[count].data = NULL;
+
+  // ========== 6. FINAL CACHE SYNC FOR HEADER ==========
+  // Sync header để đảm bảo metadata consistency
+  esp_cache_msync(psram_arrays, aligned_header_size,
+                  ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+
+  printf("[RNNoise] ✅ PSRAM Migration Complete. %d arrays loaded.\n", count);
+  return psram_arrays;
 }
 
 int rnnoise_init(DenoiseState *st, RNNModel *model) {
@@ -498,7 +491,7 @@ int rnn_compute_frame_features(DenoiseState *st, kiss_fft_cpx *X,
   // int64_t t_analysis_end = esp_timer_get_time();
   // g_prof_analysis_us = t_analysis_end - t_analysis_start;
 
-  // int64_t t_pitch_start = esp_timer_get_time();
+  int64_t t_pitch_start = esp_timer_get_time();
   RNN_MOVE(st->pitch_buf, &st->pitch_buf[FRAME_SIZE],
            PITCH_BUF_SIZE - FRAME_SIZE);
   RNN_COPY(&st->pitch_buf[PITCH_BUF_SIZE - FRAME_SIZE], in, FRAME_SIZE);
@@ -512,8 +505,8 @@ int rnn_compute_frame_features(DenoiseState *st, kiss_fft_cpx *X,
   gain = rnn_remove_doubling(pitch_buf, PITCH_MAX_PERIOD, PITCH_MIN_PERIOD,
                              PITCH_FRAME_SIZE, &pitch_index, st->last_period,
                              st->last_gain);
-  // int64_t t_pitch_end = esp_timer_get_time();
-  // g_prof_pitch_us = t_pitch_end - t_pitch_start;
+  int64_t t_pitch_end = esp_timer_get_time();
+  g_prof_pitch_us = t_pitch_end - t_pitch_start;
 
   st->last_period = pitch_index;
   st->last_gain = gain;
@@ -625,26 +618,26 @@ float rnnoise_process_frame(DenoiseState *st, float *out, const float *in) {
   static const float b_hp[2] = {-2, 1};
 
   // === PROFILING: Stage 1 - Preprocessing (Outer) ===
-  // int64_t t_biquad_start = esp_timer_get_time();
+  int64_t t_biquad_start = esp_timer_get_time();
   rnn_biquad(x, st->mem_hp_x, in, b_hp, a_hp, FRAME_SIZE);
-  // int64_t t_biquad_end = esp_timer_get_time();
-  // g_prof_biquad_us = t_biquad_end - t_biquad_start;
+  int64_t t_biquad_end = esp_timer_get_time();
+  g_prof_biquad_us = t_biquad_end - t_biquad_start;
 
   silence = rnn_compute_frame_features(st, X, P, Ex, Ep, Exp, features, x);
 
   // === PROFILING: Stage 2 - Model Inference ===
   if (!silence) {
 #if !TRAINING
-    // int64_t t_rnn_start = esp_timer_get_time();
+    int64_t t_rnn_start = esp_timer_get_time();
     compute_rnn(&st->model, &st->rnn, g, &vad_prob, features, st->arch);
-    // int64_t t_rnn_end = esp_timer_get_time();
-    // g_prof_rnn_us = t_rnn_end - t_rnn_start;
+    int64_t t_rnn_end = esp_timer_get_time();
+    g_prof_rnn_us = t_rnn_end - t_rnn_start;
 #else
     g_prof_rnn_us = 0;
 #endif
 
     // === PROFILING: Stage 3 - Postprocessing (Part 1: Pitch Filter & Gain) ===
-    // int64_t t_pfilter_start = esp_timer_get_time();
+    int64_t t_pfilter_start = esp_timer_get_time();
     rnn_pitch_filter(st->delayed_X, st->delayed_P, st->delayed_Ex,
                      st->delayed_Ep, st->delayed_Exp, g);
     for (i = 0; i < NB_BANDS; i++) {
@@ -657,18 +650,18 @@ float rnnoise_process_frame(DenoiseState *st, float *out, const float *in) {
       st->delayed_X[i].r *= gf[i];
       st->delayed_X[i].i *= gf[i];
     }
-    // int64_t t_pfilter_end = esp_timer_get_time();
-    // g_prof_pfilter_us = t_pfilter_end - t_pfilter_start;
+    int64_t t_pfilter_end = esp_timer_get_time();
+    g_prof_pfilter_us = t_pfilter_end - t_pfilter_start;
   } else {
     g_prof_rnn_us = 0;
     g_prof_pfilter_us = 0;
   }
 
   // === PROFILING: Stage 3 - Postprocessing (Part 2: Synthesis) ===
-  // int64_t t_synth_start = esp_timer_get_time();
+  int64_t t_synth_start = esp_timer_get_time();
   frame_synthesis(st, out, st->delayed_X);
-  // int64_t t_synth_end = esp_timer_get_time();
-  // g_prof_synth_us = t_synth_end - t_synth_start;
+  int64_t t_synth_end = esp_timer_get_time();
+  g_prof_synth_us = t_synth_end - t_synth_start;
 
   static int frame_count = 0;
   if (++frame_count % 100 == 0) {
