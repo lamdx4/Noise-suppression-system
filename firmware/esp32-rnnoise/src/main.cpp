@@ -137,11 +137,12 @@ extern "C" void app_main(void) {
   size_t bytes_read = 0;
   
   size_t buffer32_len = FRAME_SIZE * sizeof(int32_t); 
-  int32_t *buffer32 = (int32_t *)malloc(buffer32_len);
-  int16_t *buffer16 = (int16_t *)malloc(FRAME_SIZE * sizeof(int16_t));
+  // Optimization: Use Internal RAM and DMA-capable memory for high-speed I2S access
+  int32_t *buffer32 = (int32_t *)heap_caps_malloc(buffer32_len, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+  int16_t *buffer16 = (int16_t *)heap_caps_malloc(FRAME_SIZE * sizeof(int16_t), MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
 
   if (!buffer32 || !buffer16) {
-      ESP_LOGE(TAG, "Failed to allocate memory");
+      ESP_LOGE(TAG, "Failed to allocate memory in Internal RAM");
       return;
   }
 
@@ -150,15 +151,14 @@ extern "C" void app_main(void) {
     if (i2s_channel_read(rx_handle, buffer32, buffer32_len, &bytes_read, 1000) == ESP_OK) {
       
       int samples_read = bytes_read / 4; 
+      int samples_mono = samples_read / 2;
       
-      // Convert 32-bit -> 16-bit (MONO extraction from STEREO stream)
-      // I2S is reading STEREO (L, R, L, R, ...) but only LEFT channel has data (L/R pin grounded)
-      // Extract only LEFT channel (every other sample)
-      int samples_mono = samples_read / 2; // Half of stereo samples
+      // OPTIMIZED Conversion: Pointer manipulation instead of index math for speed
+      int32_t *src = buffer32;
+      int16_t *dst = buffer16;
       for (int i = 0; i < samples_mono; i++) {
-        // Take only LEFT channel (index 0, 2, 4, 6, ...)
-        // Using >> 16 for lower sensitivity (reduces quantization noise on quiet sounds)
-        buffer16[i] = (int16_t)(buffer32[i * 2] >> 16);
+        *dst++ = (int16_t)((*src) >> 16);
+        src += 2; // Skip right channel
       }
       
       // DEBUG: Print BOTH channels to see where data actually is
@@ -183,10 +183,11 @@ extern "C" void app_main(void) {
       if (err < 0) {
         // FIX 5: Xử lý lỗi tràn bộ nhớ (Err 12)
         if (errno == 12) {
-             // Nghỉ 10ms để giải phóng bộ đệm Wifi rồi mới gửi tiếp
-             vTaskDelay(pdMS_TO_TICKS(10));
+             // Nghỉ 5ms để giải phóng bộ đệm Wifi rồi mới gửi tiếp
+             vTaskDelay(pdMS_TO_TICKS(5)); // Reduced wait for better throughput
         } else {
-             ESP_LOGE(TAG, "TX Err %d", errno);
+             ESP_LOGE(TAG, "TX Err %d, check Server connection", errno);
+             vTaskDelay(pdMS_TO_TICKS(100));
         }
       }
     } else {
