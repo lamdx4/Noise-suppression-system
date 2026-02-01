@@ -4,6 +4,7 @@
 #include "esp_netif.h"
 #include "esp_system.h"
 #include "esp_wifi.h"
+#include "esp_heap_caps.h" // Thêm header cho heap_caps_malloc
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/task.h"
@@ -204,12 +205,12 @@ extern "C" void app_main(void)
 
     // 2. Khởi tạo Networking & I2S
     wifi_init_sta();
-    i2s_init();  // 3. Tạo 2 Task trên 2 nhân khác nhau
-  // Sampler: Core 1, Ưu tiên cao (5)
-  xTaskCreatePinnedToCore(i2s_sampler_task, "Sampler", 4096, NULL, 5, NULL, 1);
-  
-  // Sender: Core 0 (cùng CPU với Wifi stack), Ưu tiên trung bình (4)
-  xTaskCreatePinnedToCore(udp_sender_task, "Sender", 4096, NULL, 4, NULL, 0);
+    i2s_init(); // 3. Tạo 2 Task trên 2 nhân khác nhau
+    // Sampler: Core 1, Ưu tiên cao (5)
+    xTaskCreatePinnedToCore(i2s_sampler_task, "Sampler", 4096, NULL, 5, NULL, 1);
 
-  ESP_LOGI(TAG, "Multi-core Engine deployed. Streaming to %s", PC_IP_ADDR);
+    // Sender: Core 0 (cùng CPU với Wifi stack), Ưu tiên trung bình (4)
+    xTaskCreatePinnedToCore(udp_sender_task, "Sender", 4096, NULL, 4, NULL, 0);
+
+    ESP_LOGI(TAG, "Multi-core Engine deployed. Streaming to %s", PC_IP_ADDR);
 }
