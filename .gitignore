@@ -11,3 +11,4 @@ ai/**/*.pb
 data/
 .vscode/
 .pio/
+.venv/

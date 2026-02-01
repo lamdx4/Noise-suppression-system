@@ -20,9 +20,9 @@
 // =============================================================
 // CONFIGURATION
 // =============================================================
-#define WIFI_SSID "J192"
+#define WIFI_SSID "J19"
 #define WIFI_PASS "hoangchimbe"
-#define PC_IP_ADDR "192.168.1.12"
+#define PC_IP_ADDR "192.168.1.16"
 #define PC_PORT 12345
 
 #define BUFFER_SIZE (FRAME_SIZE * sizeof(int16_t)) // 960 bytes
@@ -93,40 +93,34 @@ void i2s_init()
 // =============================================================
 void i2s_sampler_task(void *pvParameters)
 {
-    size_t bytes_read = 0;
-    size_t buffer32_len = FRAME_SIZE * sizeof(int32_t);
+    // Đọc 480 "frames" I2S, mỗi frame gồm 1 slot Trái + 1 slot Phải = 2 samples 32-bit
+    size_t i2s_samples_to_read = FRAME_SIZE * 2; 
+    size_t buffer32_len = i2s_samples_to_read * sizeof(int32_t); // 3840 bytes
+    
     int32_t *buffer32 = (int32_t *)heap_caps_malloc(buffer32_len, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
     int16_t *buffer16 = (int16_t *)heap_caps_malloc(FRAME_SIZE * sizeof(int16_t), MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
 
-    if (!buffer32 || !buffer16)
-    {
-        ESP_LOGE(TAG, "Sampler Task: Failed to allocate memory in Internal RAM");
+    if (!buffer32 || !buffer16) {
+        ESP_LOGE(TAG, "Sampler Task: Memory allocation failed!");
         vTaskDelete(NULL);
     }
 
-    ESP_LOGI(TAG, "Sampler Task started on Core 1");
-
-    while (1)
-    {
-        if (i2s_channel_read(rx_handle, buffer32, buffer32_len, &bytes_read, portMAX_DELAY) == ESP_OK)
-        {
-            int samples_mono = bytes_read / 4; // Vì dùng I2S_SLOT_MODE_MONO, mỗi sample 32-bit = 4 bytes
-
-            // Convert to 16-bit Mono
+    size_t bytes_read = 0;
+    while (1) {
+        // Đọc 3840 bytes để lấy được 480 mẫu âm thanh chuẩn
+        if (i2s_channel_read(rx_handle, buffer32, buffer32_len, &bytes_read, portMAX_DELAY) == ESP_OK) {
+            int samples_captured = bytes_read / 4; 
+            int samples_mono = samples_captured / 2; // Lấy 1 nửa (chỉ kênh trái)
+            
             int32_t *src = buffer32;
             int16_t *dst = buffer16;
-            for (int i = 0; i < samples_mono; i++)
-            {
+            for (int i = 0; i < samples_mono; i++) {
                 *dst++ = (int16_t)((*src) >> 16);
-                src += 2;
+                src += 2; // Nhảy qua kênh Phải
             }
 
-            // Đẩy vào RingBuffer
-            if (xRingbufferSend(audio_ring_buf, buffer16, samples_mono * 2, pdMS_TO_TICKS(10)) != pdTRUE)
-            {
-                // Buffer đầy - có thể do Wifi chậm. Bỏ qua frame này để giữ tính thời gian thực
-                // ESP_LOGW(TAG, "RingBuffer Full!");
-            }
+            // Gửi đi đúng 960 bytes (480 samples * 2 bytes)
+            xRingbufferSend(audio_ring_buf, buffer16, samples_mono * 2, pdMS_TO_TICKS(10));
         }
     }
 }
