@@ -1,0 +1,17 @@
+d:\Projects\Speech-Enhancement\firmware\references\rnnoise-0.2\rnnoise-0.2\src\denoise.c:246:13: warning: 'fopen' is deprecated: This function or variable may be unsafe. Consider using fopen_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details. [-Wdeprecated-declarations]
+  246 |   FILE *f = fopen(filename, "rb");
+      |             ^
+C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\ucrt\stdio.h:212:20: note: 'fopen' has been explicitly marked deprecated here
+  212 |     _Check_return_ _CRT_INSECURE_DEPRECATE(fopen_s)
+      |                    ^
+C:\Program Files\Microsoft Visual Studio\18\Insiders\VC\Tools\MSVC\14.50.35717\include\vcruntime.h:368:55: note: expanded from macro '_CRT_INSECURE_DEPRECATE'
+  368 |         #define _CRT_INSECURE_DEPRECATE(_Replacement) _CRT_DEPRECATE_TEXT(    \
+      |                                                       ^
+C:\Program Files\Microsoft Visual Studio\18\Insiders\VC\Tools\MSVC\14.50.35717\include\vcruntime.h:358:47: note: expanded from macro '_CRT_DEPRECATE_TEXT'
+  358 | #define _CRT_DEPRECATE_TEXT(_Text) __declspec(deprecated(_Text))
+      |                                               ^
+1 warning generated.
+denoise-5fac5c.o : error LNK2019: unresolved external symbol rnn_parse_weights referenced in function rnnoise_init
+rnnoise_data-558fe1.o : error LNK2019: unresolved external symbol rnn_linear_init referenced in function init_rnnoise
+d:\Projects\Speech-Enhancement\server\rnnoise.dll : fatal error LNK1120: 2 unresolved externals
+clang: error: linker command failed with exit code 1120 (use -v to see invocation)
