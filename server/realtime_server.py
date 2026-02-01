@@ -107,10 +107,15 @@ class AudioServer(QtCore.QObject):
         if self.wav_clean: self.wav_clean.close()
 
     def run(self):
+        packet_count = 0
         while self.running:
             try:
                 data, addr = self.sock.recvfrom(2048)
-                if len(data) == FRAME_SIZE * 2:
+                if packet_count < 10:
+                    print(f"Received packet {packet_count}: {len(data)} bytes from {addr}")
+                    packet_count += 1
+                
+                if len(data) == FRAME_SIZE * 2: # 16-bit PCM
                     t_start = time.perf_counter()
                     raw_audio = np.frombuffer(data, dtype=np.int16).astype(np.float32)
                     
@@ -139,7 +144,8 @@ class AudioServer(QtCore.QObject):
             except socket.timeout:
                 continue
             except Exception as e:
-                print(f"Error: {e}")
+                if self.running:
+                    print(f"Error: {e}")
                 break
 
     def stop(self):
