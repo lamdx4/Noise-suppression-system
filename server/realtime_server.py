@@ -61,6 +61,10 @@ class AudioServer(QtCore.QObject):
         self.running = True
         self.rnnoise = RNNoiseWrapper(DLL_PATH)
         
+        # Runtime params
+        self.bypass = False
+        self.digital_gain = 1.0
+        
         # PyAudio setup
         self.p = pyaudio.PyAudio()
         self.stream = self.p.open(format=pyaudio.paInt16,
@@ -96,42 +100,41 @@ class AudioServer(QtCore.QObject):
         self.wav_clean.setframerate(SAMPLE_RATE)
         
         self.is_recording = True
-        print(f"Recording started: recordings/clean_{timestamp}.wav")
 
     def stop_recording(self):
         self.is_recording = False
         if self.wav_raw: self.wav_raw.close()
         if self.wav_clean: self.wav_clean.close()
-        print("Recording stopped.")
 
     def run(self):
         while self.running:
             try:
                 data, addr = self.sock.recvfrom(2048)
-                if len(data) == FRAME_SIZE * 2: # 16-bit PCM
+                if len(data) == FRAME_SIZE * 2:
                     t_start = time.perf_counter()
-                    
-                    # Convert to float32 for RNNoise
                     raw_audio = np.frombuffer(data, dtype=np.int16).astype(np.float32)
                     
-                    # Denoise
-                    clean_audio, vad = self.rnnoise.process(raw_audio)
+                    if not self.bypass:
+                        clean_audio, vad = self.rnnoise.process(raw_audio)
+                    else:
+                        clean_audio = raw_audio.copy()
+                        vad = 0.0
                     
-                    # Measurement
+                    # Apply Digital Gain
+                    clean_audio *= self.digital_gain
+                    
                     t_end = time.perf_counter()
                     proc_time_ms = (t_end - t_start) * 1000
                     
-                    # Convert back to int16 for playback
+                    # Playback
                     playback_data = clean_audio.clip(-32768, 32767).astype(np.int16)
                     self.stream.write(playback_data.tobytes())
                     
                     # Recording
                     if self.is_recording:
-                        raw_bytes = np.frombuffer(data, dtype=np.int16).tobytes()
-                        self.wav_raw.writeframes(raw_bytes)
+                        self.wav_raw.writeframes(data)
                         self.wav_clean.writeframes(playback_data.tobytes())
                     
-                    # Signal for GUI
                     self.data_received.emit(raw_audio, clean_audio, vad, proc_time_ms)
             except socket.timeout:
                 continue
@@ -153,101 +156,118 @@ class Dashboard(QtWidgets.QMainWindow):
         super().__init__()
         self.server = server
         self.setWindowTitle("ESP32-S3 RNNoise Advanced Lab Dashboard (C-Hybrid)")
-        self.resize(1200, 800)
+        self.resize(1300, 850)
         
-        # UI Styling
         self.setStyleSheet("""
-            QMainWindow { background-color: #121212; color: #E0E0E0; }
-            QLabel { color: #E0E0E0; font-family: 'Segoe UI', sans-serif; }
+            QMainWindow { background-color: #0F0F0F; color: #EEE; }
+            QLabel { color: #EEE; font-family: 'Consolas', monospace; }
+            QGroupBox { border: 2px solid #333; border-radius: 8px; margin-top: 10px; font-weight: bold; padding: 10px; }
             QPushButton { 
-                background-color: #333; color: white; border-radius: 5px; padding: 10px;
-                font-weight: bold; border: 1px solid #444;
+                background-color: #222; color: white; border-radius: 6px; padding: 12px;
+                font-weight: bold; border: 1px solid #444; min-width: 150px;
             }
-            QPushButton:checked { background-color: #D32F2F; border: 1px solid #FF5252; }
-            QProgressBar { border: 1px solid #444; border-radius: 5px; text-align: center; color: white; background-color: #222; }
-            QProgressBar::chunk { background-color: #4CAF50; }
+            QPushButton:hover { background-color: #333; }
+            QPushButton:checked { background-color: #B71C1C; }
+            QProgressBar { height: 15px; border: 1px solid #444; border-radius: 7px; text-align: center; background: #111; }
+            QProgressBar::chunk { background-color: #00E676; }
+            QSlider::handle:horizontal { background: #4CAF50; border-radius: 5px; width: 18px; }
         """)
 
-        # Layout
         central_widget = QtWidgets.QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QtWidgets.QHBoxLayout(central_widget)
         
-        # Left Panel (Controls & Stats)
+        # Left Panel (Controls)
         left_panel = QtWidgets.QVBoxLayout()
         main_layout.addLayout(left_panel, 1)
 
-        # Header
-        header = QtWidgets.QLabel("SYSTEM STATUS")
-        header.setStyleSheet("font-size: 18px; font-weight: bold; color: #4CAF50;")
-        left_panel.addWidget(header)
+        # System Header
+        title = QtWidgets.QLabel("RNNOISE ENGINE v2.0")
+        title.setStyleSheet("font-size: 20px; color: #00E676; font-weight: bold;")
+        left_panel.addWidget(title)
 
-        self.info_label = QtWidgets.QLabel("Status: Waiting for ESP32...")
-        left_panel.addWidget(self.info_label)
+        # Performance Box
+        perf_box = QtWidgets.QGroupBox("PERFORMANCE MONITOR")
+        perf_layout = QtWidgets.QVBoxLayout()
+        self.latency_label = QtWidgets.QLabel("Inference: --- ms")
+        self.latency_label.setStyleSheet("font-size: 22px; color: #FFEA00;")
+        perf_layout.addWidget(self.latency_label)
+        self.load_label = QtWidgets.QLabel("Load: 0%")
+        perf_layout.addWidget(self.load_label)
+        perf_box.setLayout(perf_layout)
+        left_panel.addWidget(perf_box)
 
-        # Latency Monitor
-        accel_box = QtWidgets.QGroupBox("Latency & Performance")
-        accel_box.setStyleSheet("color: white; font-weight: bold;")
-        accel_layout = QtWidgets.QVBoxLayout()
-        self.latency_label = QtWidgets.QLabel("Proc Time: --- ms")
-        self.latency_label.setStyleSheet("font-size: 24px; color: #FFD600;")
-        accel_layout.addWidget(self.latency_label)
-        self.load_label = QtWidgets.QLabel("CPU Load (Denoise): 0%")
-        accel_layout.addWidget(self.load_label)
-        accel_box.setLayout(accel_layout)
-        left_panel.addWidget(accel_box)
+        # Audio Processing Box
+        proc_box = QtWidgets.QGroupBox("PROCESSING CONTROLS")
+        proc_layout = QtWidgets.QVBoxLayout()
+        
+        self.bypass_btn = QtWidgets.QPushButton("BYPASS (OFF)")
+        self.bypass_btn.setCheckable(True)
+        self.bypass_btn.clicked.connect(self.toggle_bypass)
+        proc_layout.addWidget(self.bypass_btn)
+        
+        proc_layout.addWidget(QtWidgets.QLabel("Digital Gain:"))
+        self.gain_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.gain_slider.setRange(0, 400) # 0.0 to 4.0
+        self.gain_slider.setValue(100)
+        self.gain_slider.valueChanged.connect(self.update_gain)
+        proc_layout.addWidget(self.gain_slider)
+        self.gain_label = QtWidgets.QLabel("Gain: 1.0x")
+        proc_layout.addWidget(self.gain_label)
+        
+        proc_box.setLayout(proc_layout)
+        left_panel.addWidget(proc_box)
 
-        # VAD Meter
-        left_panel.addWidget(QtWidgets.QLabel("Voice Activity Detection:"))
+        # VAD Section
+        left_panel.addWidget(QtWidgets.QLabel("VOICE ACTIVITY:"))
         self.vad_bar = QtWidgets.QProgressBar()
-        self.vad_bar.setRange(0, 100)
         left_panel.addWidget(self.vad_bar)
 
-        # Controls
         left_panel.addStretch()
         self.record_btn = QtWidgets.QPushButton("🔴 START RECORDING")
         self.record_btn.setCheckable(True)
         self.record_btn.clicked.connect(self.toggle_recording)
         left_panel.addWidget(self.record_btn)
 
-        # Right Panel (Visualizers)
+        # Right Panel (Visuals)
         right_panel = QtWidgets.QVBoxLayout()
         main_layout.addLayout(right_panel, 3)
 
-        # Waveform Plot
-        self.wave_plot = pg.PlotWidget(title="Waveform Comparison")
-        self.wave_plot.setYRange(-15000, 15000)
+        self.wave_plot = pg.PlotWidget(title="Live Waveform (RED:Raw, GREEN:Clean)")
+        self.wave_plot.setYRange(-16000, 16000)
         self.wave_plot.showGrid(x=True, y=True)
-        self.wave_plot.addLegend()
-        self.raw_curve = self.wave_plot.plot(pen='r', name="Raw (ESP32)")
-        self.clean_curve = self.wave_plot.plot(pen='g', name="Cleaned (C-Backend)")
+        self.raw_curve = self.wave_plot.plot(pen='r')
+        self.clean_curve = self.wave_plot.plot(pen=pg.mkPen('#00E676', width=1.5))
         right_panel.addWidget(self.wave_plot, 1)
 
-        # Spectrogram Plot
-        self.spec_plot = pg.PlotWidget(title="Frequency Spectrogram (Waterfall)")
+        self.spec_plot = pg.PlotWidget(title="Phổ Tần Số (Waterfall Spectrogram)")
         self.img = pg.ImageItem()
         self.spec_plot.addItem(self.img)
         
-        # Color Map for Spectrogram
-        pos = np.array([0., 0.2, 0.5, 0.8, 1.0])
-        color = np.array([[0,0,0,255], [0,0,255,255], [0,255,0,255], [255,255,0,255], [255,0,0,255]], dtype=np.ubyte)
+        pos = np.array([0., 0.25, 0.5, 0.75, 1.0])
+        color = np.array([[0,0,0,255], [0,0,128,255], [0,255,128,255], [255,255,0,255], [255,0,0,255]], dtype=np.ubyte)
         cmap = pg.ColorMap(pos, color)
         self.img.setLookupTable(cmap.getLookupTable(0.0, 1.0, 256))
-        
         right_panel.addWidget(self.spec_plot, 1)
 
-        # Buffers
+        # Setup Buffers
         self.raw_buffer = np.zeros(FRAME_SIZE * 20)
         self.clean_buffer = np.zeros(FRAME_SIZE * 20)
-        
-        # Spectrogram Buffer (Scroll effect)
         self.n_fft = 512
-        self.spec_history = 100
+        self.spec_history = 120
         self.spec_data = np.zeros((self.spec_history, self.n_fft // 2))
         
-        # Connect signals
         self.server.data_received.connect(self.update_gui)
-        self.last_update = time.time()
+
+    def toggle_bypass(self):
+        self.server.bypass = self.bypass_btn.isChecked()
+        self.bypass_btn.setText("BYPASS (ON)" if self.server.bypass else "BYPASS (OFF)")
+        self.bypass_btn.setStyleSheet("background-color: #FF5722;" if self.server.bypass else "")
+
+    def update_gain(self):
+        val = self.gain_slider.value() / 100.0
+        self.server.digital_gain = val
+        self.gain_label.setText(f"Gain: {val:.2f}x")
 
     def toggle_recording(self):
         if self.record_btn.isChecked():
@@ -258,56 +278,33 @@ class Dashboard(QtWidgets.QMainWindow):
             self.server.stop_recording()
 
     def update_gui(self, raw, clean, vad, proc_time):
-        # Update buffers
         self.raw_buffer = np.roll(self.raw_buffer, -len(raw))
         self.raw_buffer[-len(raw):] = raw
-        
         self.clean_buffer = np.roll(self.clean_buffer, -len(clean))
         self.clean_buffer[-len(clean):] = clean
         
-        # Update curves
         self.raw_curve.setData(self.raw_buffer)
         self.clean_curve.setData(self.clean_buffer)
-        
-        # Update VAD
         self.vad_bar.setValue(int(vad * 100))
         
-        # Update Spectrogram (using clean audio)
-        # Simple FFT
+        # Update Spectrogram (using clean)
         window = np.hanning(len(clean))
         fft_data = np.abs(np.fft.fft(clean * window, n=self.n_fft))[:self.n_fft // 2]
-        # Log scale for visibility
         fft_log = 20 * np.log10(fft_data + 1e-6)
-        fft_norm = np.clip((fft_log + 60) / 100, 0, 1) # Normalize -60dB to 40dB range
-        
+        fft_norm = np.clip((fft_log + 60) / 100, 0, 1) 
         self.spec_data = np.roll(self.spec_data, -1, axis=0)
         self.spec_data[-1, :] = fft_norm
         self.img.setImage(self.spec_data.T)
         
-        # Update status & latency
-        self.latency_label.setText(f"Proc Time: {proc_time:.3f} ms")
-        load = (proc_time / 10.0) * 100 # 10ms frame budget
-        self.load_label.setText(f"Inference Load: {load:.1f}%")
-
-        now = time.time()
-        if now - self.last_update > 1.0:
-            self.info_label.setText(f"Connected | VAD: {vad:.2f} | C-Hybrid Mode Active")
-            self.last_update = now
+        self.latency_label.setText(f"Proc: {proc_time:.3f} ms")
+        self.load_label.setText(f"Load: {(proc_time / 10.0) * 100:.1f}%")
 
 if __name__ == "__main__":
     app = QtWidgets.QApplication(sys.argv)
     app.setStyle("Fusion")
-    
     server = AudioServer()
-    server_thread = threading.Thread(target=server.run, daemon=True)
-    server_thread.start()
-    
+    threading.Thread(target=server.run, daemon=True).start()
     gui = Dashboard(server)
     gui.show()
-    
-    def on_exit():
-        server.stop()
-        app.quit()
-        
-    app.aboutToQuit.connect(on_exit)
+    app.aboutToQuit.connect(server.stop)
     sys.exit(app.exec_())
