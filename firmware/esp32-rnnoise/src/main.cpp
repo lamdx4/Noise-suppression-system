@@ -20,9 +20,9 @@
 // =============================================================
 // CONFIGURATION
 // =============================================================
-#define WIFI_SSID "J192"
+#define WIFI_SSID "J19"
 #define WIFI_PASS "hoangchimbe"
-#define PC_IP_ADDR "192.168.1.12"
+#define PC_IP_ADDR "192.168.1.16"
 #define PC_PORT 12345
 
 #define BUFFER_SIZE (FRAME_SIZE * sizeof(int16_t)) // 960 bytes
@@ -58,7 +58,7 @@ void wifi_init_sta(void)
     s_wifi_event_group = xEventGroupCreate();
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
-    esp_netif_create_default_wifi_sta();
+    esp_netif_t *sta_netif = esp_netif_create_default_wifi_sta();
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
 
@@ -78,7 +78,12 @@ void wifi_init_sta(void)
     ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
     esp_wifi_set_max_tx_power(52);
 
+    ESP_LOGI(TAG, "Connecting to Wi-Fi SSID: %s...", WIFI_SSID);
     xEventGroupWaitBits(s_wifi_event_group, WIFI_CONNECTED_BIT, pdFALSE, pdFALSE, portMAX_DELAY);
+
+    esp_netif_ip_info_t ip_info;
+    esp_netif_get_ip_info(sta_netif, &ip_info);
+    ESP_LOGI(TAG, "Wi-Fi Connected! ESP32 IP: " IPSTR, IP2STR(&ip_info.ip));
 }
 
 void i2s_init()
@@ -86,10 +91,11 @@ void i2s_init()
     ESP_ERROR_CHECK(i2s_new_channel(&chan_cfg, NULL, &rx_handle));
     ESP_ERROR_CHECK(i2s_channel_init_std_mode(rx_handle, &std_cfg));
     ESP_ERROR_CHECK(i2s_channel_enable(rx_handle));
+    ESP_LOGI(TAG, "I2S Initialized successfully");
 }
 
 // =============================================================
-// CORE 1: Sampler Task (Chuyên trách đọc Mic & Convert)
+// CORE 1: Sampler Task
 // =============================================================
 void i2s_sampler_task(void *pvParameters)
 {
@@ -98,41 +104,35 @@ void i2s_sampler_task(void *pvParameters)
     int32_t *buffer32 = (int32_t *)heap_caps_malloc(buffer32_len, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
     int16_t *buffer16 = (int16_t *)heap_caps_malloc(FRAME_SIZE * sizeof(int16_t), MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
 
-    if (!buffer32 || !buffer16)
-    {
-        ESP_LOGE(TAG, "Sampler Task: Failed to allocate memory in Internal RAM");
+    if (!buffer32 || !buffer16) {
+        ESP_LOGE(TAG, "Sampler Task: Memory allocation failed!");
         vTaskDelete(NULL);
     }
 
-    ESP_LOGI(TAG, "Sampler Task started on Core 1");
-
-    while (1)
-    {
-        if (i2s_channel_read(rx_handle, buffer32, buffer32_len, &bytes_read, portMAX_DELAY) == ESP_OK)
-        {
+    uint32_t frame_count = 0;
+    while (1) {
+        if (i2s_channel_read(rx_handle, buffer32, buffer32_len, &bytes_read, portMAX_DELAY) == ESP_OK) {
             int samples_mono = (bytes_read / 4) / 2;
-
-            // Convert to 16-bit Mono
             int32_t *src = buffer32;
             int16_t *dst = buffer16;
-            for (int i = 0; i < samples_mono; i++)
-            {
+            for (int i = 0; i < samples_mono; i++) {
                 *dst++ = (int16_t)((*src) >> 16);
                 src += 2;
             }
 
-            // Đẩy vào RingBuffer
-            if (xRingbufferSend(audio_ring_buf, buffer16, samples_mono * 2, pdMS_TO_TICKS(10)) != pdTRUE)
-            {
-                // Buffer đầy - có thể do Wifi chậm. Bỏ qua frame này để giữ tính thời gian thực
-                // ESP_LOGW(TAG, "RingBuffer Full!");
+            if (xRingbufferSend(audio_ring_buf, buffer16, samples_mono * 2, pdMS_TO_TICKS(10)) != pdTRUE) {
+                // Buffer đầy
+            }
+
+            if (++frame_count % 100 == 0) {
+                ESP_LOGD(TAG, "Samples read: %d frames", frame_count);
             }
         }
     }
 }
 
 // =============================================================
-// CORE 0: UDP Sender Task (Chuyên trách truyền tải dữ liệu)
+// CORE 0: UDP Sender Task
 // =============================================================
 void udp_sender_task(void *pvParameters)
 {
@@ -142,43 +142,37 @@ void udp_sender_task(void *pvParameters)
     dest_addr.sin_port = htons(PC_PORT);
 
     int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
-    if (sock < 0)
-    {
-        ESP_LOGE(TAG, "UDP Sender Task: Unable to create socket: errno %d", errno);
+    if (sock < 0) {
+        ESP_LOGE(TAG, "Socket creation failed: errno %d", errno);
         vTaskDelete(NULL);
     }
 
     int snd_buf_size = 32 * 1024;
-    int err_opt = setsockopt(sock, SOL_SOCKET, SO_SNDBUF, &snd_buf_size, sizeof(snd_buf_size));
-    if (err_opt != 0)
-        ESP_LOGE(TAG, "UDP Sender Task: Failed to set buffer size");
+    setsockopt(sock, SOL_SOCKET, SO_SNDBUF, &snd_buf_size, sizeof(snd_buf_size));
 
-    ESP_LOGI(TAG, "UDP Sender Task started on Core 0. Streaming to %s:%d", PC_IP_ADDR, PC_PORT);
+    ESP_LOGI(TAG, "UDP Sender Task: Streaming to %s:%d", PC_IP_ADDR, PC_PORT);
 
-    while (1)
-    {
+    uint32_t packets_sent = 0;
+    while (1) {
         size_t item_size;
-        // Lấy dữ liệu từ RingBuffer
         void *item = xRingbufferReceive(audio_ring_buf, &item_size, portMAX_DELAY);
-
-        if (item != NULL)
-        {
+        
+        if (item != NULL) {
             int err = sendto(sock, item, item_size, 0, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
-
-            if (err < 0)
-            {
-                if (errno == 12)
-                {
-                    vTaskDelay(pdMS_TO_TICKS(2)); // Đợi nhẹ để Wifi stack thở
-                }
-                else
-                {
-                    ESP_LOGE(TAG, "UDP Sender Task: TX Err %d, check Server connection", errno);
+            
+            if (err < 0) {
+                if (errno == 12) {
+                    vTaskDelay(pdMS_TO_TICKS(2));
+                } else {
+                    ESP_LOGE(TAG, "Sendto failed: errno %d", errno);
                     vTaskDelay(pdMS_TO_TICKS(100));
                 }
+            } else {
+                packets_sent++;
+                if (packets_sent % 100 == 0) {
+                    ESP_LOGI(TAG, "Network: Sent %d packets to Server...", packets_sent);
+                }
             }
-
-            // MÀN QUAN TRỌNG: Trả lại bộ nhớ sau khi dùng xong
             vRingbufferReturnItem(audio_ring_buf, item);
         }
     }
@@ -187,30 +181,25 @@ void udp_sender_task(void *pvParameters)
 extern "C" void app_main(void)
 {
     esp_err_t ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND)
-    {
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
         ret = nvs_flash_init();
     }
     ESP_ERROR_CHECK(ret);
 
-    // 1. Khởi tạo RingBuffer
-    // NOSPLIT đảm bảo mỗi packet 960 bytes được giữ nguyên khối
+    ESP_LOGI(TAG, "--- RNNoise Dual-Core Engine Booting ---");
+
     audio_ring_buf = xRingbufferCreate(RING_BUF_SIZE, RINGBUF_TYPE_NOSPLIT);
-    if (audio_ring_buf == NULL)
-    {
-        ESP_LOGE(TAG, "Failed to create RingBuffer");
+    if (audio_ring_buf == NULL) {
+        ESP_LOGE(TAG, "RingBuffer creation failed!");
         return;
     }
 
-    // 2. Khởi tạo Networking & I2S
     wifi_init_sta();
-    i2s_init(); // 3. Tạo 2 Task trên 2 nhân khác nhau
-    // Sampler: Core 1, Ưu tiên cao (5)
-    xTaskCreatePinnedToCore(i2s_sampler_task, "Sampler", 4096, NULL, 5, NULL, 1);
+    i2s_init();
 
-    // Sender: Core 0 (cùng CPU với Wifi stack), Ưu tiên trung bình (4)
+    xTaskCreatePinnedToCore(i2s_sampler_task, "Sampler", 4096, NULL, 5, NULL, 1);
     xTaskCreatePinnedToCore(udp_sender_task, "Sender", 4096, NULL, 4, NULL, 0);
 
-    ESP_LOGI(TAG, "Multi-core Engine deployed. Streaming to %s", PC_IP_ADDR);
+    ESP_LOGI(TAG, "System Ready. Core 1: Sampler | Core 0: Network");
 }
