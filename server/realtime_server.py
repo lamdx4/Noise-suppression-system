@@ -240,28 +240,33 @@ class Dashboard(QtWidgets.QMainWindow):
         main_layout.addLayout(right_panel, 3)
 
         self.wave_plot = pg.PlotWidget(title="Live Waveform (RED:Raw, GREEN:Clean)")
+        self.wave_plot.setLabel('left', 'Amplitude', units='PCM')
+        self.wave_plot.setLabel('bottom', 'Samples')
         self.wave_plot.setYRange(-16000, 16000)
         self.wave_plot.showGrid(x=True, y=True)
         self.raw_curve = self.wave_plot.plot(pen='r')
         self.clean_curve = self.wave_plot.plot(pen=pg.mkPen('#00E676', width=1.5))
         right_panel.addWidget(self.wave_plot, 1)
 
-        self.spec_plot = pg.PlotWidget(title="Phổ Tần Số (Waterfall Spectrogram)")
-        self.img = pg.ImageItem()
-        self.spec_plot.addItem(self.img)
-        
-        pos = np.array([0., 0.25, 0.5, 0.75, 1.0])
-        color = np.array([[0,0,0,255], [0,0,128,255], [0,255,128,255], [255,255,0,255], [255,0,0,255]], dtype=np.ubyte)
-        cmap = pg.ColorMap(pos, color)
-        self.img.setLookupTable(cmap.getLookupTable(0.0, 1.0, 256))
-        right_panel.addWidget(self.spec_plot, 1)
+        self.freq_plot = pg.PlotWidget(title="Frequency Spectrum (Amplitude vs Frequency)")
+        self.freq_plot.setLabel('left', 'Magnitude', units='dB')
+        self.freq_plot.setLabel('bottom', 'Frequency', units='Hz')
+        self.freq_plot.setYRange(-60, 40)
+        self.freq_plot.setXRange(0, SAMPLE_RATE // 2)
+        self.freq_plot.showGrid(x=True, y=True)
+        self.raw_freq_curve = self.freq_plot.plot(pen=pg.mkPen('r', width=1, style=QtCore.Qt.DotLine), name="Raw")
+        self.clean_freq_curve = self.freq_plot.plot(pen=pg.mkPen('#00E676', width=1.5), name="Clean")
+        right_panel.addWidget(self.freq_plot, 1)
 
         # Setup Buffers
         self.raw_buffer = np.zeros(FRAME_SIZE * 20)
         self.clean_buffer = np.zeros(FRAME_SIZE * 20)
         self.n_fft = 512
-        self.spec_history = 120
-        self.spec_data = np.zeros((self.spec_history, self.n_fft // 2))
+        self.freq_axis = np.fft.rfftfreq(self.n_fft, 1/SAMPLE_RATE)
+        self.window = np.hanning(FRAME_SIZE) # Pre-calculate window
+        
+        # Throttling
+        self.update_counter = 0
         
         self.server.data_received.connect(self.update_gui)
 
@@ -284,23 +289,30 @@ class Dashboard(QtWidgets.QMainWindow):
             self.server.stop_recording()
 
     def update_gui(self, raw, clean, vad, proc_time):
+        # Always update buffers to keep data continuous
         self.raw_buffer = np.roll(self.raw_buffer, -len(raw))
         self.raw_buffer[-len(raw):] = raw
         self.clean_buffer = np.roll(self.clean_buffer, -len(clean))
         self.clean_buffer[-len(clean):] = clean
         
+        # Only update the visual plots every 3 frames (~33 FPS) to avoid lag
+        self.update_counter += 1
+        if self.update_counter % 3 != 0:
+            return
+
         self.raw_curve.setData(self.raw_buffer)
         self.clean_curve.setData(self.clean_buffer)
         self.vad_bar.setValue(int(vad * 100))
         
-        # Update Spectrogram (using clean)
-        window = np.hanning(len(clean))
-        fft_data = np.abs(np.fft.fft(clean * window, n=self.n_fft))[:self.n_fft // 2]
-        fft_log = 20 * np.log10(fft_data + 1e-6)
-        fft_norm = np.clip((fft_log + 60) / 100, 0, 1) 
-        self.spec_data = np.roll(self.spec_data, -1, axis=0)
-        self.spec_data[-1, :] = fft_norm
-        self.img.setImage(self.spec_data.T)
+        # Update Frequency Spectrum (FFT)
+        raw_fft = np.abs(np.fft.rfft(raw * self.window, n=self.n_fft))
+        raw_db = 20 * np.log10(raw_fft + 1e-6)
+        
+        clean_fft = np.abs(np.fft.rfft(clean * self.window, n=self.n_fft))
+        clean_db = 20 * np.log10(clean_fft + 1e-6)
+        
+        self.raw_freq_curve.setData(self.freq_axis, raw_db)
+        self.clean_freq_curve.setData(self.freq_axis, clean_db)
         
         self.latency_label.setText(f"Proc: {proc_time:.3f} ms")
         self.load_label.setText(f"Load: {(proc_time / 10.0) * 100:.1f}%")
