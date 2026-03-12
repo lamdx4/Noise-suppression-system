@@ -1,0 +1,228 @@
+\section{Kiến trúc Hệ thống (Hybrid DSP/Deep Learning)}
+
+Khác với các phương pháp học sâu toàn trình (End-to-End Deep Learning) thường đòi hỏi năng lực tính toán lớn để trực tiếp tái tạo dạng sóng (waveform) hay phổ tín hiệu (spectrogram), kiến trúc RNNoise \cite{valin2018hybrid} giải quyết rào cản tính toán thời gian thực bằng triết lý thiết kế lai (hybrid). Hệ thống sử dụng các thuật toán Xử lý Tín hiệu Số (DSP) để trích xuất đặc trưng và hậu xử lý tín hiệu, đồng thời sử dụng mạng học sâu (Deep Learning) để ước lượng các tham số triệt nhiễu. Cách tiếp cận này giúp giảm đáng kể số lượng tham số mô hình, tạo tiền đề để triển khai trên các thiết bị nhúng có tài nguyên hạn chế.
+
+Quá trình xử lý tín hiệu được chia thành 3 giai đoạn chính, thể hiện sự kết hợp chặt chẽ giữa DSP và Deep Learning.
+
+\subsection{Giai đoạn 1: Tiền xử lý và Trích xuất Đặc trưng (Pre-processing \& Feature Extraction)}
+Tín hiệu âm thanh đầu vào trên miền thời gian có tần số lấy mẫu $f_s = 48$ kHz trước tiên được đi qua một Cửa lọc Thông cao (High-pass Filter) IIR nhằm triệt tiêu các thành phần nhiễu nhiễu điện từ tần số cực thấp (DC offset, tiếng ồn gió cấp). Sau đó, luồng tín hiệu được phân chia thành hai nhánh xử lý song song:
+\begin{enumerate}
+    \item \textbf{Cửa sổ hóa chồng lấn và Biến đổi FFT (Overlapped Window \& FFT)}: Tín hiệu được cắt rã thành các khung (frames) có kích thước 480 mẫu (tương đương 10 ms). Để giảm thiểu rò rỉ phổ năng lượng tại biên, hệ thống áp dụng hàm cửa sổ Vorbis có kích thước gấp đôi 960 mẫu (20 ms) với độ chồng chéo 50\% (overlap). Khung tín hiệu này sau đó trải qua nòng cốt biến đổi nhanh KissFFT 960 điểm, sinh ra 481 điểm phổ tần số (không gian phức).
+    \item \textbf{Phân tích Cao độ (Pitch Analysis)}: Cùng lúc, nhánh thứ hai thực hiện thuật toán Tương quan chéo (Cross-correlation) dò quét trên miền thời gian nhằm khoanh vùng chu kỳ cơ bản (pitch period). Các ngưỡng chặn quét được giới hạn chặt chẽ ở độ trễ (lag) từ \textit{60 mẫu} (tương đương cao độ tối đa 800 Hz) đến \textit{768 mẫu} (tương đương cao độ tối thiểu 62.5 Hz). Tại đây, một biến đổi FFT phụ trợ trợ tiếp tục giải mã cửa sổ cao độ này thành phổ tương quan.
+\end{enumerate}
+Giao hội từ nguồn phổ FFT 481 điểm nhánh một và phổ chu kỳ Pitch nhánh hai, hệ thống khởi động khối \textbf{Trích xuất Đặc trưng (Feature Extraction)}. Ở khâu này, bộ phân tích dải Bark (Bark-scale Banding) chắt lọc các điểm tần số rải rác nguyên gốc, gom nhóm phi tuyến thành 32 dải băng thông năng lượng. 
+
+Kết quả chung cuộc của Giai đoạn 1 xuất ra vector đặc trưng trọn vẹn 65 chiều $\left(32 \text{ hệ số năng lượng phổ dải Bark} + 32 \text{ hệ số tương quan pitch theo dải} + 1 \text{ chu kỳ pitch chuẩn hóa}\right)$ cung cấp cho quy trình mạng học sâu nội ứng.
+
+\begin{figure}[H]
+    \centering
+    \resizebox{\textwidth}{!}{
+    \begin{tikzpicture}[
+        block/.style={rectangle, draw, fill=blue!10, text width=7.5em, text centered, rounded corners, minimum height=3.5em},
+        line/.style={draw, -latex, thick}
+    ]
+        % --- TỌA ĐỘ TUYỆT ĐỐI ---
+        
+        % Đầu vào / Đầu ra (X=0)
+        \node [block, fill=red!10] (input) at (0, 4.5) {Tín hiệu vào\\(Input 48kHz)};
+        \node [block, fill=red!10] (output) at (0, -2.5) {Tín hiệu ra\\(Clean Speech)};
+        
+        % Tiền/Hậu xử lý (X=3.5 và X=5)
+        \node [block] (hpf) at (3.5, 4.5) {Lọc thông cao\\(High-pass IIR)};
+        \node [block] (ifft) at (4.5, -2.5) {IFFT 960 điểm\\\& Overlap-Add};
+        
+        % Phân tích DSP (X=7.5)
+        \node [block] (fft) at (7.5, 6) {Cửa sổ Vorbis\\\& FFT 960 điểm};
+        \node [block] (pitch) at (7.5, 3) {Dò Pitch \&\\FFT Tương quan};
+        
+        \node [block, fill=yellow!20, text width=8.5em] (delay) at (7.5, 0) {Bộ đệm Trễ\\(Delay 1 Frame)};
+        \node [circle, draw, minimum size=1.2cm, text centered] (mul) at (8.5, -2.5) {\Huge $\times$};
+        
+        % Trích xuất & Lọc (X=11.5)
+        \node [block] (bandE) at (11.5, 4.5) {Năng lượng Bark\\\& Tương quan};
+        \node [block] (pitchF) at (11.5, 0) {Lọc lược Cao độ\\(Pitch Filter)};
+        \node [block] (interp) at (11.5, -2.5) {Nội suy 32 Gains\\$\rightarrow$ Phổ 481 Bins};
+        
+        % AI (X=15.5)
+        \node [block, fill=green!10] (features) at (15.5, 4.5) {Vector Đặc trưng\\(65 chiều)};
+        \node [block, fill=orange!10] (rnn) at (15.5, 0) {Mô hình AI\\(3x GRU 256)};
+        
+        % --- KẾT NỐI LUỒNG DSP PHÂN TÍCH ---
+        \path [line] (input) -- (hpf);
+        \path [line] (hpf.east) -| (5.5, 6) -- (fft.west);
+        \path [line] (hpf.east) -| (5.5, 3) -- (pitch.west);
+        
+        \path [line] (fft.east) -| (9.5, 4.5) -- (bandE.west);
+        \path [line] (pitch.east) -| (9.5, 4.5) -- (bandE.west);
+        
+        \path [line] (bandE) -- (features);
+        \path [line] (features) -- (rnn);
+        
+        % --- KẾT NỐI LUỒNG ĐỆM TRỄ (DELAY) ---
+        % Phổ X(k) từ FFT đi vòng qua Pitch xuống Delay
+        \path [line] (fft.south) -- (7.5, 5.1) -| (5.8, 1.5) |- ([yshift=0.3cm]delay.west) node[pos=0.15, right] {Phổ $X(k)$};
+        
+        % Phổ P(k) từ Pitch xuống Delay
+        \path [line] (pitch.south) -- (delay.north) node[midway, right] {Phổ $P(k)$};
+        
+        % --- KẾT NỐI LUỒNG ĐIỀU KHIỂN & LỌC ---
+        % Delay truyền sang Pitch Filter
+        \path [line] (delay.east) -- (pitchF.west) node[midway, above] {$X_d, P_d$};
+        
+        % AI cấp Gains cho Pitch Filter và Nội suy 
+        \path [line] (rnn.west) -- (pitchF.east) node[midway, above] {Gains};
+        \path [line] (rnn.south) |- (interp.east);
+        
+        \path [line] (interp.west) -- (mul.east);
+        
+        % Pitch Filter trả phổ X đã lọc xuống bộ nhân
+        \path [line] (pitchF.south) |- (10, -1.25) -| (mul.north) node[near start, left] {$X_f$};
+        
+        % Bộ nhân ra IFFT rồi Output
+        \path [line] (mul.west) -- (ifft.east) node[midway, above] {$Y(k)$};
+        \path [line] (ifft.west) -- (output.east);
+
+    \end{tikzpicture}
+    }
+    \caption{Sơ đồ khối tổng thể của quá trình xử lý tín hiệu lai DSP/AI với bộ đệm Trễ (Delay) theo mã nguồn thực tế.}
+    \label{fig:rnnoise_block_update}
+\end{figure}
+
+\subsection{Giai đoạn 2: Suy luận Học sâu (RNN Inference \& Noise Spectral Estimation)}
+Thay vì sử dụng kiến trúc rẽ nhánh phân kì nhỏ (khoảng 85 nghìn tham số) như đề xuất sơ khởi năm 2018 \cite{valin2018hybrid}, hệ thống thực tế áp dụng mô hình kiến trúc xếp chồng (Stacked) nâng cấp (2024) quy mô lớn với dung lượng lên tới xấp xỉ 1.34 triệu tham số (chính xác: \textbf{1,341,729 weights}). Mạng học sâu tiếp nhận vector 65 chiều và thực hiện biểu diễn lại phổ đặc trưng thông qua 3 lớp phân giải:
+\begin{enumerate}
+    \item \textbf{Trích xuất Đặc trưng cục bộ (Conv1D)}: Đầu vào đi qua 2 lớp Tích chập 1 chiều (1D Convolution) với nhân chập (kernel size) bằng 3 nhằm khám phá các mối liên hệ không gian/tần số ngắn hạn của tín hiệu.
+    \item \textbf{Nhớ chuỗi thời gian (Stacked GRU)}: Dữ liệu lan truyền qua 3 lớp \textit{Gated Recurrent Unit (GRU)} xếp chồng liên tiếp. Mỗi lớp sở hữu kích thước ma trận ẩn cực đại lên tới 256 nơ-ron, giúp mô hình hóa triệt để không gian chuỗi thời gian của tiếng ồn ổn định lẫn nhiễu biến đổi (non-stationary noise).
+    \item \textbf{Kết nối tắt rẽ nhánh (Skip Connections)}: Thay vì chỉ lấy hệ số từ lớp cuối, hệ thống thực hiện nối gộp (Concatenation) trực tiếp các ma trận $\rightarrow$ (Đầu ra lớp Conv1D thứ 2 + GRU1 + GRU2 + GRU3). Khái niệm rẽ nhánh DenseNet này giúp bảo toàn gradient đi sâu và nâng cao độ hội tụ của bộ trọng số.
+\end{enumerate}
+
+\begin{figure}[H]
+    \centering
+    \begin{tikzpicture}[
+        node distance=0.8cm and 0.5cm,
+        block/.style={rectangle, draw, fill=blue!10, text width=7em, text centered, rounded corners, minimum height=2.5em},
+        line/.style={draw, -latex, thick}
+    ]
+        % Nodes
+        \node [block, fill=red!10] (input) {Input Features\\65-dim};
+        \node [block, below=0.5cm of input] (conv1) {Conv1D};
+        \node [block, below=0.5cm of conv1] (conv2) {Conv1D};
+        \node [block, below=0.5cm of conv2] (gru1) {GRU 1 (256)};
+        \node [block, below=0.5cm of gru1] (gru2) {GRU 2 (256)};
+        \node [block, below=0.5cm of gru2] (gru3) {GRU 3 (256)};
+        
+        \node [circle, draw, fill=green!10, minimum size=1cm, text centered, right=2cm of gru2] (concat) {Cat};
+        
+        \node [block, fill=orange!10, rounded corners=0, above right=0cm and 1cm of concat] (vad) {Dense (VAD)\\1-dim};
+        \node [block, fill=orange!10, rounded corners=0, below right=0cm and 1cm of concat] (gains) {Dense (Gains)\\32-dim};
+
+        % Paths
+        \path [line] (input) -- (conv1);
+        \path [line] (conv1) -- (conv2);
+        \path [line] (conv2) -- (gru1);
+        \path [line] (gru1) -- (gru2);
+        \path [line] (gru2) -- (gru3);
+        
+        \path [line] (conv2.east) -| ([xshift=-1cm]concat.north) -- (concat.north);
+        \path [line] (gru1.east) -| ([xshift=-0.5cm]concat.north) -- (concat.north);
+        \path [line] (gru2.east) -- (concat.west);
+        \path [line] (gru3.east) -| ([xshift=-0.5cm]concat.south) -- (concat.south);
+
+        \path [line] (concat.east) |- (vad.west);
+        \path [line] (concat.east) |- (gains.west);
+    \end{tikzpicture}
+    \caption{Cấu trúc Topology mạng GRU 256-unit (bản cải tiến 2024) áp dụng kỹ thuật nối gộp Skip-Connections.}
+    \label{fig:rnnoise_rnn_2024}
+\end{figure}
+
+Từ ma trận được nối gộp, khối Mạng Nơ-ron xuất ra hai cụm quyết định độc lập thông qua hai lớp kết nối dày đặc (Dense Layers):
+\begin{itemize}
+    \item \textbf{Phát hiện Hoạt động Giọng nói (Voice Activity Detection - VAD)}: Cờ nhị phân mềm (soft-flag) đầu ra $\in [0, 1]$ quyết định thời điểm hệ thống cần cập nhật mức định lượng phổ ồn (when to adapt). 
+    \item \textbf{Hệ số Trừ Phổ (Spectral Subtraction Gains)}: 32 hệ số khuếch đại (Gains) $\hat{g}_b \in [0, 1]$ ước lượng tuyệt đối khối lượng năng lượng tạp âm cần trừ bỏ (what to subtract). Giới hạn ở ngưỡng 32 tham số trực tiếp ngăn chặn các sai nhiễu do mạng (artifacts) trong bước trừ phổ tiếp theo.
+\end{itemize}
+
+\begin{figure}[H]
+    \centering
+    \resizebox{0.8\textwidth}{!}{
+    \begin{tikzpicture}[
+        node distance=1.5cm and 2cm,
+        block/.style={rectangle, draw, fill=blue!10, text width=7em, text centered, rounded corners, minimum height=3em},
+        line/.style={draw, -latex, thick}
+    ]
+        % --- TỌA ĐỘ TUYỆT ĐỐI ---
+        \node [block, fill=green!10, text width=8em] (rnn) at (0, 3) {Mạng AI (RNNoise)};
+        
+        \node [block, fill=orange!10] (vad) at (4, 4.5) {Đầu ra VAD\\($p \in [0,1]$)};
+        \node [block, fill=orange!10] (gains) at (4, 1.5) {Đầu ra 32 Gains\\($g_b \in [0,1]$)};
+        
+        \node [block, fill=yellow!20, text width=9em] (noise) at (8, 4.5) {Theo dõi Ngữ cảnh\\(State Adaptation)};
+        \node [block] (interp) at (8, 1.5) {Nội suy Tuyến tính\\$\rightarrow$ Mask $G(k)$};
+        
+        \node [block, fill=red!10] (xk) at (4, -1.5) {Phổ thô $X(k)$};
+        \node [circle, draw, minimum size=1.2cm, text centered] (mul) at (8, -1.5) {\Large $\times$};
+        \node [block, fill=red!10] (yk) at (12, -1.5) {Phổ sạch $Y(k)$};
+        
+        % Routes
+        \path [line] (rnn.east) -| (2, 4.5) -- (vad.west);
+        \path [line] (rnn.east) -| (2, 1.5) -- (gains.west);
+        
+        \path [line] (vad) -- (noise);
+        % VAD context directly influencing how gains might be interpreted, or just fed back conceptually
+        \path [line, dashed] (noise) -- (interp) node[midway, right, text width=2cm] {\footnotesize Lọc nhiễu tĩnh};
+        
+        \path [line] (gains) -- (interp);
+        
+        \path [line] (interp) -- (mul) node[midway, right] {Trọng số $G(k)$};
+        \path [line] (xk) -- (mul);
+        \path [line] (mul) -- (yk);
+        
+    \end{tikzpicture}
+    }
+    \caption{Nguyên lý tương tác giữa VAD, Ước lượng Phổ ồn và Trừ phổ (Spectral Subtraction) trực tiếp thông qua dải Bark Gains.}
+    \label{fig:vad_spectral_subtraction_update}
+\end{figure}
+
+\subsection{Giai đoạn 3: Hậu xử lý và Khôi phục Tín hiệu (DSP Synthesis)}
+Nhận lại băng thông 32 hệ số \textit{Gains} xuất chuẩn từ mô hình AI cùng dữ kiện tần số từ Giai đoạn 1, thuật toán DSP khép kín quy trình tổng hợp dựa trên đồ thị tái tạo:
+\begin{itemize}
+    \item \textbf{Nội suy Hệ số khuếch đại (Band Gain Interpolation)}: Các hệ số Gain đại diện cho độ suy hao 32 dải Bark được nội suy tuyến tính trở lại thành một tập hợp đường cong suy giảm liên tục, khớp hoàn hảo với bình độ phân giải của phổ FFT gốc nhằm ngăn chặn đứt gãy năng lượng phổ.
+    \item \textbf{Lọc Cao độ (Pitch Filtering)}: Song hành với đường truyền Nội suy, phổ FFT thô ban đầu được áp dụng hệ thống Lọc cao độ. Căn cứ vào dữ liệu chu kỳ \textit{Pitch} được trích xuất từ trước, màng lọc này gạn bỏ triệt để phần năng lượng nhiễu lọt thỏm giữa các khe họa âm (inter-harmonic noise) của tiếng nói.
+    \item \textbf{Nhân hệ số mặt nạ (Multiplier X) và Biến đổi nghịch nghịch (IFFT)}: Phổ tín hiệu đã qua màng lọc Pitch sẽ được nhân vi xử lý tích trực diện (X) với mốc hệ số suy hao vừa được nội suy. Sau khi kết tủa phổ làm sạch, dòng biến đổi Fourier Nhanh Nghịch đảo (IFFT) ép tín hiệu chuyển ngược từ miền tần số quay trở về miền thời gian đại số.
+    \item \textbf{Cộng chồng lấn Cửa sổ (Window Overlap-add)}: Điểm cuối cùng của quy mô là khi các khung tín hiệu thời gian được triệt xuất liền mạch qua thuật toán cộng chồng lấn (overlap-add), giải phóng hoàn chỉnh khối sóng âm rành mạch, bảo tồn thanh âm con người nguyên bản.
+\end{itemize}
+
+\begin{figure}[H]
+    \centering
+    \resizebox{0.9\textwidth}{!}{
+    \begin{tikzpicture}[
+        node distance=1.5cm and 2cm,
+        block/.style={rectangle, draw, fill=blue!10, text width=8em, text centered, rounded corners, minimum height=3.5em},
+        line/.style={draw, -latex, thick}
+    ]
+        % --- TỌA ĐỘ TUYỆT ĐỐI ---
+        \node [block, fill=orange!10] (gains) at (0, 3) {32 Hệ số Gains\\(Từ Lõi AI)};
+        \node [block] (interp) at (4, 3) {Nội suy Dải tĩnh\\$\rightarrow$ Màng lọc $G_f(k)$};
+        
+        \node [block, fill=yellow!20] (delay) at (0, -1) {Bộ đệm Trễ\\(Phổ $X_d$, $P_d$)};
+        \node [block] (pitchF) at (4, -1) {Lọc lược Cao độ\\(Pitch Filter)};
+        
+        \node [circle, draw, minimum size=1.5cm, text centered] (mul) at (8, 1) {\Huge $\times$};
+        
+        \node [block] (ifft) at (12, 1) {IFFT 960 điểm\\\& Overlap-add};
+        \node [block, fill=red!10] (out) at (16, 1) {Tín hiệu PCM\\(Sạch tĩnh)};
+
+        % --- KẾT NỐI ---
+        \path [line] (gains) -- (interp);
+        \path [line] (interp.east) -| (mul.north);
+        
+        \path [line] (delay) -- (pitchF);
+        \path [line] (pitchF.east) -| (mul.south) node[near start, below] {Phổ âm $X_p(k)$};
+        
+        \path [line] (mul) -- (ifft) node[midway, above] {$Y(k)$};
+        \path [line] (ifft) -- (out);
+        
+    \end{tikzpicture}
+    }
+    \caption{Sơ đồ luồng Giai đoạn 3: Hậu xử lý tín hiệu (DSP Synthesis) gồm Nội suy Gains, Lọc lược Cao độ và IFFT chồng lấn.}
+    \label{fig:dsp_synthesis}
+\end{figure}

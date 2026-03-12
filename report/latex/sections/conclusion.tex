@@ -1,0 +1,14 @@
+\section{Kết luận và Hướng phát triển}
+
+Đồ án đã trình bày quy trình khảo cứu, phân tích và triển khai kiến trúc học sâu lai DSP/RNN (RNNoise) trong bài toán khử nhiễu tiếng nói đơn kênh. Thông qua việc phân bổ tài nguyên có hệ thống từ cấp độ vi kiến trúc phần cứng (tập lệnh SIMD PIE, phân bổ Internal RAM, lượng tử hóa INT8) trên phần cứng nhúng tiêu chuẩn công nghiệp ESP32-S3, chúng tôi đã đẩy lùi hoàn toàn những cản trở về giới hạn tính toán vô hướng (Compute Bound). Tuy nhiên, các phân tích thực nghiệm xuyên suốt đồ án cũng chứng minh một cách xác đáng về nút thắt cổ chai không thể tránh khỏi đối với hệ thống bộ nhớ vi điều khiển (Memory/IO Bound). Khác với các thuật toán CV (Computer Vision), trọng số của Recurrent Neural Networks không mang tính tái sử dụng cục bộ (no weight reuse), do đó giới hạn cứng về băng thông PSRAM triệt tiêu độ khả thi của suy luận thời gian thực đối với bất kỳ mô hình hồi quy lớn ($\sim 1.3$ MB) dựa trên khung 10ms.
+
+Giải pháp \textit{Kiến trúc Phân tán Edge-to-Server} được đề xuất là một thỏa hiệp hoàn hảo giữa tính di động thiết bị biên (quản lý DMA, lấy mẫu, truyền phát) và sức mạnh xử lý AVX2 của máy chủ. Cấu trúc hybrid này đã đem lại trải nghiệm âm thanh sắc nét, sạch tạp âm với độ trễ tối thiểu, triệt tiêu sự vấp ngáp vốn dĩ trên các hệ mã hóa băng tần tiêu biểu.
+
+\subsection*{Hướng phát triển trong tương lai}
+
+Để có thể đóng gói hoàn toàn thuật toán học sâu vào thiết bị biên siêu nhỏ (Standalone Edge AI), tương lai nghiên cứu có thể định hướng theo hai chiến lược cơ bản:
+\begin{enumerate}
+    \item \textbf{Thưa hóa mô hình (Sparsification)}: Khai thác bản chất phân bố rời rạc của các điểm sáng ma trận trọng số trong mạng RNN để bỏ qua phần lớn các phép tính vô giá trị (bằng $0$). Điều này có thể kéo giảm quy mô lưu trữ từ 1.3 MB xuống dưới 100 KB, vừa vặn với dung lượng L1 Cache nhỏ nhoi của vi điều khiển.
+    \item \textbf{Lượng tử hóa cấp tính (Sub-byte Quantization)}: Thay vì tính toán dựa trên mức INT8, chuyển sang mô phỏng trọng số đa phân Binary ($1$-bit) hoặc INT4, kết hợp với các bộ tăng tốc phần cứng NPU (Neural Processing Unit) thế hệ mới trong các dòng vi điều khiển tương lai.
+\end{enumerate}
+Cả hai giả thuyết trên đều là bước đệm đưa sức mạnh của DSP và AI hội tụ, giải quyết triệt để vấn đề méo âm nhiễu phi tuyến và đáp ứng tiêu chuẩn xử lý cực hạn trên thiết bị thông minh (Smart Wearables).

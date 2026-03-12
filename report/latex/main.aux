@@ -1,0 +1,52 @@
+\relax 
+\providecommand\hyper@newdestlabel[2]{}
+\providecommand\HyField@AuxAddToFields[1]{}
+\providecommand\HyField@AuxAddToCoFields[2]{}
+\citation{oppenheim1978evaluation}
+\citation{chen1995adaptive}
+\citation{valin2018hybrid}
+\citation{valin2018hybrid}
+\citation{valin2018hybrid}
+\citation{valin2024noise}
+\@writefile{toc}{\contentsline {section}{\numberline {1}Giới thiệu}{3}{section.1}\protected@file@percent }
+\citation{valin2018hybrid}
+\@writefile{toc}{\contentsline {section}{\numberline {2}Kiến trúc Hệ thống (Hybrid DSP/Deep Learning)}{4}{section.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.1}Giai đoạn 1: Tiền xử lý và Trích xuất Đặc trưng (Pre-processing \& Feature Extraction)}{4}{subsection.2.1}\protected@file@percent }
+\citation{valin2018hybrid}
+\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces Sơ đồ khối tổng thể của quá trình xử lý tín hiệu lai DSP/AI với bộ đệm Trễ (Delay) theo mã nguồn thực tế.}}{5}{figure.caption.2}\protected@file@percent }
+\providecommand*\caption@xref[2]{\@setref\relax\@undefined{#1}}
+\newlabel{fig:rnnoise_block_update}{{1}{5}{Sơ đồ khối tổng thể của quá trình xử lý tín hiệu lai DSP/AI với bộ đệm Trễ (Delay) theo mã nguồn thực tế}{figure.caption.2}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.2}Giai đoạn 2: Suy luận Học sâu (RNN Inference \& Noise Spectral Estimation)}{5}{subsection.2.2}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {2}{\ignorespaces Cấu trúc Topology mạng GRU 256-unit (bản cải tiến 2024) áp dụng kỹ thuật nối gộp Skip-Connections.}}{6}{figure.caption.3}\protected@file@percent }
+\newlabel{fig:rnnoise_rnn_2024}{{2}{6}{Cấu trúc Topology mạng GRU 256-unit (bản cải tiến 2024) áp dụng kỹ thuật nối gộp Skip-Connections}{figure.caption.3}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {3}{\ignorespaces Nguyên lý tương tác giữa VAD, Ước lượng Phổ ồn và Trừ phổ (Spectral Subtraction) trực tiếp thông qua dải Bark Gains.}}{6}{figure.caption.4}\protected@file@percent }
+\newlabel{fig:vad_spectral_subtraction_update}{{3}{6}{Nguyên lý tương tác giữa VAD, Ước lượng Phổ ồn và Trừ phổ (Spectral Subtraction) trực tiếp thông qua dải Bark Gains}{figure.caption.4}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.3}Giai đoạn 3: Hậu xử lý và Khôi phục Tín hiệu (DSP Synthesis)}{7}{subsection.2.3}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {4}{\ignorespaces Sơ đồ luồng Giai đoạn 3: Hậu xử lý tín hiệu (DSP Synthesis) gồm Nội suy Gains, Lọc lược Cao độ và IFFT chồng lấn.}}{7}{figure.caption.5}\protected@file@percent }
+\newlabel{fig:dsp_synthesis}{{4}{7}{Sơ đồ luồng Giai đoạn 3: Hậu xử lý tín hiệu (DSP Synthesis) gồm Nội suy Gains, Lọc lược Cao độ và IFFT chồng lấn}{figure.caption.5}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {3}Quá trình Huấn luyện Mô hình AI (Training Pipeline)}{8}{section.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.1}Chuẩn bị Dữ liệu và Đặc trưng hóa (Features Extraction)}{8}{subsection.3.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.2}Tối ưu hóa Hàm Mất mát (Custom Perceptual Loss)}{8}{subsection.3.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.3}Cắt gọt nơ-ron: Thưa thớt hóa (Sparsification)}{8}{subsection.3.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.4}Ép xung và Dịch thuật (Quantization \& C-Header Export)}{9}{subsection.3.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {4}Thực nghiệm và Đánh giá}{10}{section.4}\protected@file@percent }
+\newlabel{sec:results}{{4}{10}{Thực nghiệm và Đánh giá}{section.4}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.1}Phân tích Giới hạn Bộ nhớ (Hardware Bottleneck Analysis)}{10}{subsection.4.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.2}Mô hình Kiến trúc Phân tán (Edge-to-Server)}{10}{subsection.4.2}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {5}{\ignorespaces Sơ đồ luồng dữ liệu Kiến trúc Phân tán lai (Edge-to-Server Hybrid) giữa thiết bị gốc ESP32-S3 Đa nhân và Máy chủ AI qua giao thức đường truyền UDP.}}{11}{figure.caption.6}\protected@file@percent }
+\newlabel{fig:edge_to_server}{{5}{11}{Sơ đồ luồng dữ liệu Kiến trúc Phân tán lai (Edge-to-Server Hybrid) giữa thiết bị gốc ESP32-S3 Đa nhân và Máy chủ AI qua giao thức đường truyền UDP}{figure.caption.6}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.3}Hàm Mất mát \& Lược bỏ Tham số (Training \& Sparsification)}{11}{subsection.4.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {5}Kết luận và Hướng phát triển}{12}{section.5}\protected@file@percent }
+\citation{*}
+\bibstyle{IEEEtran}
+\bibdata{references}
+\bibcite{oppenheim1978evaluation}{1}
+\bibcite{chen1995adaptive}{2}
+\bibcite{valin2018hybrid}{3}
+\bibcite{valin2024noise}{4}
+\bibcite{fosd}{5}
+\bibcite{lu2016vivos}{6}
+\bibcite{phoaudiobook}{7}
+\bibcite{dnschallenge2020}{8}
+\bibcite{esp32s3trm}{9}
+\gdef \@abspage@last{13}

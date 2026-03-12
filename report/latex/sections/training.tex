@@ -1,0 +1,38 @@
+\section{Quá trình Huấn luyện Mô hình AI (Training Pipeline)}
+
+Thuật toán cấu trúc mạng AI RNNoise dù được thiết kế mỏng nhẹ, nhưng để đạt được chất lượng lọc nhiễu "Human-like" (giống thính giác người), hệ thống đòi hỏi một quy trình huấn luyện (Training Pipeline) cực kỳ đồ sộ và tinh vi. Trong khuôn khổ đồ án, hệ thống học sâu đã được tái thiết kế và huấn luyện hoàn toàn bằng nền tảng \textbf{PyTorch} thay cho Keras bản gốc, giúp dễ dàng tích hợp lượng tử hóa (Quantization) và thưa thớt hóa (Sparsification).
+
+Quy trình huấn luyện này chạy độc lập dưới dạng Offline, được chia thành bốn bước trọng tâm:
+
+\subsection{Chuẩn bị Dữ liệu và Đặc trưng hóa (Features Extraction)}
+Thay vì nạp trực tiếp hàng triệu tệp âm thanh WAV dung lượng khổng lồ vào GPU, nền tảng sử dụng một công cụ trích xuất được viết bằng C (tool \texttt{dump\_features.c}). Công cụ này đóng vai trò ép xung dữ liệu thô:
+\begin{itemize}
+    \item \textbf{Định dạng âm thanh}: Mọi tệp âm thanh (cả tiếng nói sạch \textit{Clean Speech} và tạp âm \textit{Noise}) đều được chuẩn hóa về định dạng Raw PCM 16-bit, tần số lấy mẫu 48kHz (qua phần mềm cục bộ SoX).
+    \item \textbf{Ghép nhiễu động (Dynamic Mixing)}: Quá trình gộp âm thanh được thực hiện ngay tại thời gian chạy (runtime). Công cụ quét ngẫu nhiên mức tỉ số Tín hiệu trên Nhiễu (SNR) và ngẫu nhiên cộng ghép tiếng ồn định hướng vào tiếng nói sạch.
+    \item \textbf{Trích xuất Vector 65 chiều}: Áp dụng chính xác chuỗi mạng DSP ở Giai đoạn Tiền xử lý (FFT $\rightarrow$ Phân dải Bark $\rightarrow$ Tính Năng lượng \& Cao độ) để biến đổi các khung tín hiệu nhiễu thành các Vector Đặc trưng 65 chiều. Đồ thị đầu ra (Ground-truth) chính là mức chênh lệch Năng lượng Lý tưởng (Ideal Ratio Mask), lưu thành luồng ma trận số thực \texttt{.f32}.
+\end{itemize}
+
+\subsection{Tối ưu hóa Hàm Mất mát (Custom Perceptual Loss)}
+Dữ liệu Đặc trưng \texttt{.f32} sau đó được đẩy vào mô hình 3 lớp GRU 256 nơ-ron trên môi trường PyTorch. Khác với các mô hình phân loại thông thường sử dụng Cross-Entropy/MSE tĩnh, RNNoise tính toán sai số thông qua \textit{Hàm mất mát Cảm quan thính giác (Perceptual Loss)}:
+\begin{equation}
+    Loss = Loss_{gain} + \lambda \cdot Loss_{vad}
+\end{equation}
+Trong đó:
+\begin{itemize}
+    \item $Loss_{gain} = \frac{1}{N} \sum (1 + 5 \cdot VAD) \cdot Mask(g) \cdot \left( \hat{g}^\gamma - g_{target}^\gamma \right)^2$: Hệ thống trừng phạt cực nặng đối với các lỗi suy hao Gain tại những dải Bark đang có tiếng nói ($5 \cdot VAD$). Biến số gamma $\gamma$ được thiết lập nhằm mô phỏng độ cong cảm nhận âm lượng phi tuyến của tai người.
+    \item $Loss_{vad}$ là hàm Cross-Entropy nhị phân thông thường, đóng vai trò phạt những dự đoán sai lệch về xác suất có tiếng người (Voice Activity).
+\end{itemize}
+Mô hình sử dụng thuật toán tối ưu \textbf{AdamW} ($lr=1e^{-3}, \beta=[0.8, 0.98]$) kết hợp Lịch trình giảm tốc (Lambda LR Scheduler) xuyên suốt khoảng 150 vòng hội tụ (Epochs).
+
+\subsection{Cắt gọt nơ-ron: Thưa thớt hóa (Sparsification)}
+Mặc dù 3 lớp GRU 256 nơ-ron mang lại hiệu năng cao, lượng tham số $1.3 \times 10^6$ vẫn là rào cản quá lớn về băng thông và tốc độ chép xung đối với Cache L1 của đa số các hệ gen CPU. 
+
+Tại bước huấn luyện, hệ thống áp dụng kỹ thuật \textbf{Thưa thớt hóa ma trận trọng số (Sparsification/Pruning)}. Trong quá trình Backpropagation (Lan truyền ngược), các trọng số nội tại (weights) bên trong khối GRU gần tiệm cận 0 sẽ bị ép buộc rụng hẳn (gán bằng 0). Kết thúc dải huấn luyện, mô hình rơi rụng các cầu nối nơ-ron thừa thãi, tỷ lệ thưa thớt có thể đạt từ \textbf{20\% đến 30\%}. Mạng lúc này đã trở nên "xốp" hơn, tạo tiền đề để các nhân thư viện SIMD CPU tính toán bỏ qua các chỉ số tham số dư thừa, tăng tốc trực tiếp thời gian suy luận.
+
+\subsection{Ép xung và Dịch thuật (Quantization \& C-Header Export)}
+Mô hình sau khi hội tụ sẽ mang các tệp trọng số có cấu trúc dấu phẩy động 32-bit (FP32 \texttt{.pth}). Để tương thích với đồ án nhúng và hạ tầng Shared Library (C/C++), một kịch bản \texttt{export\_to\_c.py} được kích hoạt với nhiệm vụ:
+\begin{itemize}
+    \item Xê lùi dấu phẩy tĩnh \textbf{Lượng tử hóa lượng giác (8-bit Quantization)}: Đại bộ phận các trọng số GRU được ép xung từ tỷ lệ float32 về int8 ($\sim 1/128$ scale). Điều này giúp kích thước model giảm thẳng 4 lần.
+    \item Xuất mã nguồn: Biến đổi lưới tensor nơ-ron thành một file Header ngôn ngữ C (\texttt{rnn\_data.c, rnn\_data.h}), chứa các mảnh mảng 1D cấu trúc tĩnh.
+\end{itemize}
+Tại đây, quá trình Huấn luyện Mô hình khép lại. Hệ thống mạng thần kinh nhân tạo chính thức hóa đá thành các mã ASCII tĩnh, sẵn sàng được nạp (load) thẳng vào RAM nhúng/Server qua Giai đoạn Suy luận Real-time.

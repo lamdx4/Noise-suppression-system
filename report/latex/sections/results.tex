@@ -1,0 +1,80 @@
+\section{Thực nghiệm và Đánh giá}
+\label{sec:results}
+
+Mặc dù mô hình RNNoise hướng tới tính tinh gọn trong kiến trúc thuật toán, khối lượng hơn 1.34 triệu tham số (1,341,729 weights) của mô hình ứng dụng toàn thời (Standalone Edge AI) trên vi điều khiển ESP32-S3 vẫn đối mặt với những giới hạn phần cứng đặc thù về cấu trúc bộ nhớ.
+
+\subsection{Phân tích Giới hạn Bộ nhớ (Hardware Bottleneck Analysis)}
+Kết quả thực nghiệm cho thấy năng lực tính toán (Compute-Bound) của vi điều khiển ESP32-S3 có thể đáp ứng được các tác vụ DSP cơ bản thông qua khả năng tối ưu hóa tập lệnh vi mô. Bằng việc áp dụng tập lệnh SIMD PIE (Processor Instruction Extensions) trên Internal RAM, thời gian thực thi của tác vụ trích xuất đặc trưng (\textit{Pitch Search}) đã được tối ưu hóa tăng cường tốc độ lên \textbf{3.64 lần}.
+
+Tuy nhiên, quá trình suy luận mạng học sâu (AI Inference) đã để lộ rào cản nghiêm trọng đối với thiết kế vi kiến trúc của phần cứng. Đặc thù của mạng tuần tự hồi quy (RNN) yêu cầu hệ thống nạp lại toàn bộ trạng thái trọng số tại mỗi bước khung (step), nên không phản ánh tính chất tái sử dụng cục bộ (No Weight Reuse). Do bộ nhớ đệm L1 (L1 Cache) của ESP32-S3 chỉ giới hạn ở mức 32KB, CPU liên tục phải truy xuất và thay thế dữ liệu từ bộ nhớ ngoài PSRAM thông qua chuẩn giao tiếp Octal SPI. Quá trình này dẫn đến hiện tượng trễ thu hồi (Cache Thrashing), khi mà băng thông PSRAM duy trì ở giới hạn $\sim 130$ MB/s. 
+Số liệu đo đạc chỉ ra rằng thời gian xử lý suy luận mạng RNN trên thiết bị tiêu tốn khoảng $\textbf{99 ms}$ trên mỗi khung 10ms. Khoảng chênh lệch này vi phạm nghiêm ngặt yêu cầu thời gian thực của ứng dụng xử lý âm thanh số, vốn dĩ yêu cầu trễ xử lý (processing delay) phải thấp hơn độ dịch khung (frame shift). Kết quả này định hình cần thiết đổi cấu trúc quy hoạch tính toán xử lý đối với phương thức thiết kế nhúng.
+
+\subsection{Mô hình Kiến trúc Phân tán (Edge-to-Server)}
+Nhằm vượt qua nút thắt băng thông (I/O Bottleneck), chúng tôi đề xuất kiến trúc xử lý lai phân tán kết hợp Thiết bị biên và Máy chủ (Edge-to-Server):
+\begin{enumerate}
+    \item \textbf{Thiết bị biên (ESP32-S3 Gateway)}: Chỉ chuyên trách nhiệm vụ thu nhận, lấy mẫu ADC, và giải mã ngắt I2S DMA bằng lõi xử lý Core 1. Lõi Core 0 đảm nhận việc đóng gói luồng bit âm thanh PCM chuẩn hóa để truyền phát theo giao thức mạng UDP. Việc giảm tải suy luận tính toán làm cho độ trễ nội sinh tại khâu thu phát đạt tiệm cận $\approx 10$ ms.
+    \item \textbf{Máy chủ Suy luận (AI Inference Server)}: Đảm nhận trọn bộ công tác tính toán Mạng nơ-ron và DSP. Với lợi thế lớn về bộ nhớ RAM DDR5 băng thông rộng và tập lệnh đa phần tử AVX2, máy chủ hoàn tất tính toán suy luận 1.34 triệu tham số chỉ duy trì ở mức $\textbf{< 0.1 ms}$.
+\end{enumerate}
+
+\begin{figure}[H]
+    \centering
+    \resizebox{\textwidth}{!}{
+    \begin{tikzpicture}[
+        node distance=1.5cm and 2cm,
+        block/.style={rectangle, draw, fill=blue!10, text width=8em, text centered, rounded corners, minimum height=3em},
+        server_block/.style={rectangle, draw, fill=green!10, text width=9em, text centered, rounded corners, minimum height=3em},
+        line/.style={draw, -latex, thick}
+    ]
+        % --- ESP32-S3 (Edge) ---
+        \node [block, fill=red!10] (mic) at (0, 5) {Microphone\\(I2S DMA)};
+        \node [block] (core1) at (4, 5) {Lõi Core 1\\(Lấy mẫu ADC)};
+        \node [block] (core0_tx) at (8, 5) {Lõi Core 0\\(Đóng gói UDP Tx)};
+        
+        \node [block, fill=red!10] (speaker) at (0, 0) {Loa - Speaker\\(I2S Playback)};
+        \node [block] (core1_rx) at (4, 0) {Lõi Core 1\\(Giải mã I2S)};
+        \node [block] (core0_rx) at (8, 0) {Lõi Core 0\\(Nhận UDP Rx)};
+        
+        % Box to group ESP32
+        \draw[dashed, thick, gray] (-2, -1.5) rectangle (10, 6.5);
+        \node[text=gray, anchor=south east] at (10, 6.5) {\textbf{Thiết bị biên: ESP32-S3}};
+        
+        % --- Máy chủ Server ---
+        \node [server_block] (server_rx) at (15, 5) {UDP Socket Rx\\(Đệm 960 bytes)};
+        \node [server_block, fill=orange!10, text width=10.5em] (rnnoise) at (15, 2.5) {Động cơ RNNoise AI\\(Python \& C/C++ AVX2)};
+        \node [server_block] (server_tx) at (15, 0) {UDP Socket Tx\\(Phát âm thanh sạch)};
+        
+        % Box to group Server
+        \draw[dashed, thick, gray] (12.5, -1.5) rectangle (17.5, 6.5);
+        \node[text=gray, anchor=south east] at (17.5, 6.5) {\textbf{Máy chủ (Server)}};
+        
+        % --- KẾT NỐI ESP32 ---
+        \path [line] (mic) -- (core1);
+        \path [line] (core1) -- (core0_tx);
+        
+        \path [line] (core0_rx) -- (core1_rx);
+        \path [line] (core1_rx) -- (speaker);
+        
+        % --- KẾT NỐI MẠNG ---
+        \path [line] (core0_tx) -- (server_rx) node[midway, above, yshift=0.1cm] {Raw \texttt{UDP} (Nhiễu)} node[midway, below, yshift=-0.1cm] {\textbf{LAN}};
+        \path [line] (server_tx) -- (core0_rx) node[midway, above, yshift=0.1cm] {Denoised \texttt{UDP} (Sạch)} node[midway, below, yshift=-0.1cm] {\textbf{LAN}};
+        
+        % --- KẾT NỐI SERVER ---
+        \path [line] (server_rx) -- (rnnoise);
+        \path [line] (rnnoise) -- (server_tx);
+        
+    \end{tikzpicture}
+    }
+    \caption{Sơ đồ luồng dữ liệu Kiến trúc Phân tán lai (Edge-to-Server Hybrid) giữa thiết bị gốc ESP32-S3 Đa nhân và Máy chủ AI qua giao thức đường truyền UDP.}
+    \label{fig:edge_to_server}
+\end{figure}
+
+Với kiến trúc giải tỏa này, thời gian luân chuyển toàn trình (End-to-End Latency) bao gồm: Tiền trình Lấy mẫu I2S ($\approx 10$ ms) + Độ trễ mạng nội bộ LAN ($\approx 20$ ms) + Thời gian suy luận Inference (< 0.1 ms). Tổng trễ hệ thống cấu thành $\mathbf{\approx 30.25 ms}$, đáp ứng tiêu chuẩn xử lý âm thanh thời gian thực cho hạ tầng truyền thông viễn thông (< 40 ms).
+
+\subsection{Hàm Mất mát \& Lược bỏ Tham số (Training \& Sparsification)}
+Giới hạn khả năng phần cứng buộc hệ thống đào tạo (Training) mô hình qua cơ sở dữ liệu (PyTorch) phải tối ưu bộ trọng số mạnh mẽ. Kho văn bản dữ liệu hỗn hợp thu thập từ tập dữ liệu DNS Challenge, FOSD và VIVOS được huấn luyện thông qua hàm mất mát đánh giá mức suy giảm nhận thức Perceptual Loss ($\gamma=0.25$):
+
+\begin{equation}
+    \mathcal{L}_{gain} = \frac{1}{N} \sum (1 + 5 \cdot \text{VAD}) \cdot \text{Mask} \cdot (\hat{g}^{0.25} - g_{ideal}^{0.25})^2
+\end{equation}
+
+Hàm tổ hợp tổn thất trên kết hợp đánh trọng số chặt đối với nhãn hoạt động âm thoại (Voice Activity Detection - VAD) nhằm hạn chế sinh tín hiệu ảo tại các dải không có tiếng người. Hơn thế nữa, quá trình rút gọn quy mô, kỹ thuật Thưa hóa mô hình Cấp tiến (\textit{Progressive Sparsification}) được ban hành, ép ràng buộc ma trận tính toán GRU quy nạp trên khối kích thước $8\times4$. Chiến lược huấn luyện đánh rơi này triệt tiêu xấp xỉ $70\%$ chỉ số lượng tham số kết nối (đưa ma trận ẩn về giá trị $0$), góp phần đẩy nhanh tốc độ hội tụ và giảm độ ngốn bộ đệm mà không làm giảm phẩm chất khôi phục hài âm thoại gốc.

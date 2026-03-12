@@ -1,0 +1,70 @@
+\documentclass[11pt,a4paper,final]{article}
+
+% --- Packages ---
+\usepackage[utf8]{inputenc}
+\usepackage[T5]{fontenc}
+\usepackage{vietnam}
+\usepackage{amsmath,amsfonts,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{geometry}
+\usepackage{cite}
+\usepackage{listings}
+\usepackage{color}
+\usepackage{subcaption}
+\usepackage{float}
+\usepackage{tikz}
+\usetikzlibrary{shapes.geometric, arrows, positioning}
+% --- Layout ---
+\geometry{a4paper, margin=2.5cm}
+\hypersetup{colorlinks=true, linkcolor=blue, citecolor=red, urlcolor=cyan}
+
+% --- Code Style ---
+\definecolor{codegray}{rgb}{0.5,0.5,0.5}
+\definecolor{codepurple}{rgb}{0.58,0,0.82}
+\lstdefinestyle{mystyle}{
+    commentstyle=\color{codegray},
+    keywordstyle=\color{blue},
+    numberstyle=\tiny\color{codegray},
+    stringstyle=\color{codepurple},
+    basicstyle=\ttfamily\footnotesize,
+    breaklines=true,
+    numbers=left,
+    frame=single
+}
+\lstset{style=mystyle}
+
+% --- Title & Author ---
+\title{\textbf{Real-time Speech Enhancement System\\ Hybrid ESP32-S3 and High-Performance Server Architecture}}
+\author{Dang Xuan Lam \\ \textit{PTIT HCM}}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\input{sections/abstract}
+
+\newpage
+\tableofcontents
+\newpage
+
+% --- Main Body ---
+\input{sections/introduction}
+\newpage
+\input{sections/architecture}
+\newpage
+\input{sections/training}
+\newpage
+\input{sections/results}
+\newpage
+\input{sections/conclusion}
+
+% --- References ---
+\newpage
+\nocite{*}
+\bibliographystyle{IEEEtran}
+\bibliography{references}
+
+\end{document}

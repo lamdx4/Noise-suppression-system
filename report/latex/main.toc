@@ -1,0 +1,15 @@
+\contentsline {section}{\numberline {1}Giới thiệu}{3}{section.1}%
+\contentsline {section}{\numberline {2}Kiến trúc Hệ thống (Hybrid DSP/Deep Learning)}{4}{section.2}%
+\contentsline {subsection}{\numberline {2.1}Giai đoạn 1: Tiền xử lý và Trích xuất Đặc trưng (Pre-processing \& Feature Extraction)}{4}{subsection.2.1}%
+\contentsline {subsection}{\numberline {2.2}Giai đoạn 2: Suy luận Học sâu (RNN Inference \& Noise Spectral Estimation)}{5}{subsection.2.2}%
+\contentsline {subsection}{\numberline {2.3}Giai đoạn 3: Hậu xử lý và Khôi phục Tín hiệu (DSP Synthesis)}{7}{subsection.2.3}%
+\contentsline {section}{\numberline {3}Quá trình Huấn luyện Mô hình AI (Training Pipeline)}{8}{section.3}%
+\contentsline {subsection}{\numberline {3.1}Chuẩn bị Dữ liệu và Đặc trưng hóa (Features Extraction)}{8}{subsection.3.1}%
+\contentsline {subsection}{\numberline {3.2}Tối ưu hóa Hàm Mất mát (Custom Perceptual Loss)}{8}{subsection.3.2}%
+\contentsline {subsection}{\numberline {3.3}Cắt gọt nơ-ron: Thưa thớt hóa (Sparsification)}{8}{subsection.3.3}%
+\contentsline {subsection}{\numberline {3.4}Ép xung và Dịch thuật (Quantization \& C-Header Export)}{9}{subsection.3.4}%
+\contentsline {section}{\numberline {4}Thực nghiệm và Đánh giá}{10}{section.4}%
+\contentsline {subsection}{\numberline {4.1}Phân tích Giới hạn Bộ nhớ (Hardware Bottleneck Analysis)}{10}{subsection.4.1}%
+\contentsline {subsection}{\numberline {4.2}Mô hình Kiến trúc Phân tán (Edge-to-Server)}{10}{subsection.4.2}%
+\contentsline {subsection}{\numberline {4.3}Hàm Mất mát \& Lược bỏ Tham số (Training \& Sparsification)}{11}{subsection.4.3}%
+\contentsline {section}{\numberline {5}Kết luận và Hướng phát triển}{12}{section.5}%

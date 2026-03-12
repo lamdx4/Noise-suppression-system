@@ -1,0 +1,89 @@
+﻿BÁO CÁO TIẾN ĐỘ: PHÂN TÍCH CƠ CHẾ HOẠT ĐỘNG CỦA HỆ THỐNG KHỬ NHIỄU LAI (HYBRID DEEP LEARNING)
+1. Tổng quan giải pháp Nhóm đề xuất sử dụng kiến trúc Recurrent Neural Network for Noise Reduction. Đây là giải pháp lai (Hybrid) kết hợp giữa Xử lý tín hiệu số (DSP) truyền thống và Học sâu (Deep Learning).
+* Mục tiêu: Đạt hiệu suất khử nhiễu cao thời gian thực (Real-time) trên các thiết bị tài nguyên hạn chế như ESP32.
+* Nguyên lý: Thay vì dùng AI để tái tạo toàn bộ sóng âm (rất nặng), hệ thống dùng AI để điều khiển các bộ lọc tần số (nhẹ hơn hàng trăm lần).
+2. Quy trình xử lý tín hiệu chi tiết (4 Giai đoạn)
+Hệ thống hoạt động dựa trên luồng dữ liệu đi qua 4 giai đoạn xử lý liên tục:
+  
+
+
+
+  
+
+Giai đoạn 1: Trích xuất đặc trưng & Nén thính giác (Feature Extraction)
+* Phân tích phổ: Tín hiệu âm thanh đầu vào được chuyển sang miền tần số thông qua FFT.
+* Mô phỏng thính giác (Bark Scale): Thay vì xử lý hàng nghìn điểm tần số tuyến tính, hệ thống gom nhóm lại thành 32 dải băng tần (Bands) dựa trên thang đo Bark.
+   * Cơ chế: Các dải tần số thấp (giọng trầm) được chia nhỏ để giữ độ chi tiết. Các dải tần số cao được gom nhóm lớn hơn do tai người ít nhạy cảm.
+* Tạo Vector đầu vào (Input Vector): Hệ thống tạo ra một vector đặc trưng gồm 65 chiều để đưa vào AI, bao gồm:
+   * 32 giá trị: Năng lượng của 32 dải băng tần (cho biết độ to/nhỏ).
+   * 32 giá trị: Độ tương quan Pitch của 32 dải băng tần (cho biết tín hiệu có tính chu kỳ/tiếng người hay không).
+   * 1 giá trị: Chu kỳ cao độ (Pitch Period) tổng thể.
+Giai đoạn 2: Phát hiện cao độ (Pitch Detection)
+* Song song với việc phân tích năng lượng, hệ thống sử dụng thuật toán Tự tương quan (Autocorrelation) để tìm tần số cơ bản của giọng nói.
+* Vai trò:
+   * Cung cấp thông tin để tạo ra 32 đặc trưng tương quan cho Giai đoạn 1.
+   * Làm tham số đầu vào cho "Bộ lọc lược" ở Giai đoạn 4.
+   * Ý nghĩa: Giúp hệ thống phân biệt rõ ràng giữa tiếng người (có nhịp điệu rung của dây thanh quản) và tiếng ồn môi trường (hỗn loạn, không chu kỳ).
+Giai đoạn 3: Phân lớp & Quyết định bằng AI (Deep Learning Inference)
+* Mạng Nơ-ron (sử dụng kiến trúc GRU/RNN) nhận vector 65 đặc trưng đầu vào và xử lý chuỗi thời gian để nhận diện ngữ cảnh.
+* Đầu ra: AI trả về 32 hệ số khuếch đại (Gains) tương ứng với 32 dải băng tần. (Giá trị từ 0 đến 1: 0 là triệt tiêu nhiễu, 1 là giữ nguyên tín hiệu).
+* Kỹ thuật Nội suy (Interpolation):
+   * Vì 32 hệ số Gain là quá thô so với hàng trăm điểm tần số thực tế, hệ thống sử dụng thuật toán Nội suy tuyến tính để biến 32 điểm mốc này thành một đường cong Gain mượt mà.
+   * Kết quả: Đảm bảo âm thanh không bị méo dạng bậc thang (artifacts) tại điểm giao giữa các dải tần, giúp việc chuyển đổi giữa vùng ồn và vùng tiếng nói diễn ra tự nhiên.
+Giai đoạn 4: Tái tạo và Lọc lược (Synthesis & Pitch Filtering)
+* Áp dụng Gain: Các hệ số Gain sau khi nội suy được nhân vào phổ tín hiệu để loại bỏ năng lượng nhiễu.
+* Lọc lược (Comb Filtering): Đây là bước hậu xử lý quan trọng nhất để khôi phục chất lượng giọng nói. Dựa trên cao độ (Pitch) tìm được ở Giai đoạn 2, hệ thống áp dụng một bộ lọc hình chiếc lược:
+   * Tăng cường năng lượng tại đúng các tần số hài (harmonics) của giọng nói.
+   * Làm suy giảm các thành phần tạp âm còn sót lại nằm xen kẽ giữa các tần số hài.
+* Kết quả: Âm thanh đầu ra trong trẻo, loại bỏ được hiệu ứng "nghẹt mũi" hoặc "giọng robot" thường thấy ở các thuật toán khử nhiễu cổ điển.
+3. Đánh giá tính khả thi trên Thiết bị nhúng
+* Tối ưu hóa tính toán: Việc AI chỉ xử lý 65 đặc trưng (thay vì hàng nghìn mẫu âm thanh thô) giúp giảm tải khối lượng tính toán xuống mức tối thiểu, phù hợp với năng lực xử lý của vi điều khiển.
+* Bộ nhớ: Mô hình mạng GRU nhỏ gọn, không chiếm nhiều dung lượng lưu trữ (Flash/RAM).
+* Chất lượng: Sự kết hợp giữa AI (nhận diện nhiễu tốt) và DSP (Bộ lọc lược giữ giọng tốt) tạo ra sự cân bằng hoàn hảo giữa hiệu năng và chất lượng.
+5. Kiến trúc Mạng Nơ-ron (Model Architecture)
+Hệ thống sử dụng một mô hình Deep Learning được tối ưu hóa đặc biệt cho dữ liệu chuỗi thời gian (âm thanh) với kích thước nhỏ gọn để chạy trên thiết bị nhúng.
+  
+
+* Đầu vào (Input Layer):
+   1. Kích thước: 65 đặc trưng (như đã phân tích ở Giai đoạn 1).
+   2. Bao gồm: 32 năng lượng băng tần + 32 độ tương quan Pitch + 1 chu kỳ Pitch.
+* Khối trích xuất đặc trưng cục bộ (Convolutional Blocks):
+   1. Sử dụng 2 lớp tích chập 1 chiều (1D Convolution).
+   2. Mục đích: Giúp mô hình học được các mối quan hệ ngắn hạn giữa các đặc trưng liền kề trước khi đưa vào bộ nhớ dài hạn.
+* Khối xử lý chuỗi (Recurrent Blocks - GRU):
+   1. Sử dụng 3 lớp GRU (Gated Recurrent Unit) xếp chồng lên nhau.
+   2. Kích thước ẩn (Hidden size): 256 đơn vị (neurons) mỗi lớp.
+   3. Lý do dùng GRU: GRU nhẹ hơn LSTM nhưng vẫn có khả năng "nhớ" thông tin trong quá khứ (như tiếng quạt nền đã kêu 10 giây trước) để phân biệt với tiếng ồn đột ngột.
+* Cơ chế kết nối tắt (DenseNet-style Skip Connections):
+   1. Đây là điểm cải tiến mạnh mẽ trong phiên bản code mới. Đầu ra của lớp cuối cùng không chỉ lấy từ GRU lớp 3, mà là sự nối gộp (Concatenation) của tất cả các lớp trước đó (Input + GRU1 + GRU2 + GRU3).
+   2. Ý nghĩa: Giúp luồng thông tin không bị mất đi qua các lớp sâu, đồng thời giúp mô hình hội tụ nhanh hơn khi huấn luyện.
+* Đầu ra (Output Heads): Mô hình rẽ nhánh ra 2 kết quả:
+   1. Denoising Gain (32 units): Các hệ số lọc nhiễu cho 32 băng tần (dùng hàm kích hoạt Sigmoid để đưa về khoảng 0-1).
+   2. VAD Output (1 unit): Xác suất phát hiện giọng nói (Voice Activity Detection). Đây là thông tin phụ trợ giúp hệ thống biết khi nào nên tắt hẳn tiếng nếu không có người nói.
+6. Chiến lược Dữ liệu & Huấn luyện (Dataset & Training Strategy)
+Mô hình không được học vẹt trên một bộ dữ liệu cố định, mà sử dụng kỹ thuật Tăng cường dữ liệu động (Dynamic Data Augmentation) ngay trong quá trình chuẩn bị dữ liệu.
+* Nguồn dữ liệu thô (Raw Materials):
+   * Clean Speech: Hàng nghìn giờ giọng nói sạch từ 2 bộ dataset lớn: FPT Open Speech Dataset (FOSD) - Vietnamese, VIVOS: Vietnamese Speech Corpus for ASR
+   * Noise: Hàng trăm loại tiếng ồn môi trường được lấy từ: microsoft/DNS-Challenge
+   * RIRs (Room Impulse Responses): microsoft/DNS-Challenge.
+* Quy trình trộn dữ liệu ("The Mixer"): thực hiện việc tổng hợp dữ liệu training theo thời gian thực:
+   * Trộn ngẫu nhiên: Lấy một đoạn giọng sạch + trộn với một đoạn tiếng ồn bất kỳ.
+   * Mô phỏng môi trường: Áp dụng RIR để làm cho giọng nói nghe như đang ở trong phòng kín (có độ vang), giúp AI không bị bỡ ngỡ khi dùng thực tế.
+   * Lọc tần số ngẫu nhiên (Spectral Tilt): Giả lập đặc tính thu âm của các loại micro khác nhau (micro điện thoại, micro laptop, micro xịn...).
+   * Tỷ lệ nhiễu (SNR Levels): Thay đổi độ to nhỏ của nhiễu ngẫu nhiên (từ rất ồn đến rất êm) để AI học cách xử lý mọi tình huống.
+* Mục tiêu huấn luyện (Ground Truth):
+   * Hệ thống biết trước âm thanh sạch gốc (Clean) và âm thanh hỗn hợp (Noisy).
+   * Nó tính toán ra "Gain lý tưởng" (Ideal Ratio Mask): Tức là tại băng tần này, cần nhân với bao nhiêu để từ Noisy quay về Clean.
+   * AI sẽ được huấn luyện để dự đoán ra cái Gain lý tưởng này sao cho sai số là thấp nhất.
+
+
+Tài liệu tham khảo:
+* Oppenheim, A., & Lim, J. (1978). Evaluation of an adaptive comb filtering method for enhancing speech degraded by white noise addition. IEEE Transactions on Acoustics, Speech, and Signal Processing, 26(4), 353-359.
+* Chen, J.-H., & Gersho, A. (1995). Adaptive postfiltering for quality enhancement of coded speech. IEEE Transactions on Speech and Audio Processing, 3(1), 59-71
+* Valin, J.-M. (2018). A Hybrid DSP/Deep Learning Approach to Real-Time Full-Band Speech Enhancement. IEEE 20th International Workshop on Multimedia Signal Processing
+* Valin, J.-M., et al. (2024). Noise-robust DSP-assisted neural pitch estimation with very low complexity. ICASSP 2024 - 2024 IEEE International Conference on Acoustics, Speech and Signal Processing.
+Tài liệu Nguồn Dữ liệu (Datasets):
+* FPT Corporation. FPT Open Speech Dataset (FOSD). Bộ dữ liệu giọng nói tiếng Việt mã nguồn mở.
+* Lu, H. T., & Vu, T. (2016). VIVOS: A free Vietnamese speech corpus for machine translation and speech recognition. Tạp chí khoa học Đại học Khoa học Tự nhiên ĐHQG-HCM.
+* Thivux. thivux/phoaudiobook. Hugging Face Datasets. (Bộ dữ liệu âm thanh sách nói tiếng Việt chất lượng cao, cung cấp nguồn giọng nói sạch chuẩn phòng thu).
+* Dubey, S., et al. (2020). ICASSP Deep Noise Suppression (DNS) Challenge. Microsoft Corporation. (Nguồn dữ liệu tiếng ồn môi trường đa dạng và Room Impulse Responses - RIRs).

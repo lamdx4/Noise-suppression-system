@@ -1,0 +1,60 @@
+﻿1. Mục tiêu
+Dự án hướng tới việc triển khai mô hình học sâu RNNoise trên vi điều khiển ESP32-S3 nhằm lọc tiếng ồn môi trường theo thời gian thực.
+Yêu cầu kỹ thuật cốt lõi:
+* Chất lượng âm thanh: Chuẩn cao cấp (48kHz, 16-bit).
+* Độ trễ (Latency): Cực thấp (< 10ms) để đáp ứng chuẩn đàm thoại trực tiếp.
+2. Giai đoạn 1: Tối ưu hóa trên ESP32-S3 & Rào cản Vật lý
+2.1. Thành tựu Tối ưu hóa Cấp độ Hệ thống
+Nhóm phát triển đã áp dụng các kỹ thuật can thiệp sâu vào phần cứng nhằm khai thác tối đa năng lực của ESP32-S3:
+* Tối ưu hóa tập lệnh (SIMD PIE Assembly): Tự viết lại các nhân tính toán lõi.
+* Tái cấu trúc Bộ nhớ: Đưa toàn bộ Kernel tính toán vào IRAM nhằm triệt tiêu tranh chấp bus. Sử dụng heap_caps_aligned_alloc để căn lề trọng số mô hình khớp với Cache-line của PSRAM.
+*  Lưu ý: Kích thước file mã nguồn ban đầu lên tới 5MB, nhưng nhờ quá trình tối ưu và biên dịch, dung lượng nhị phân thực tế nạp vào RAM chỉ còn khoảng 1.3MB.
+* Lượng tử hóa (Quantization): Chuyển đổi trọng số sang định dạng INT8 kết hợp tính toán Float, duy trì độ chính xác của mô hình ở mức > 99.999%.
+2.2. Phân tích Nút thắt Cổ chai (Bottleneck): Băng thông PSRAM
+Dù đã tối ưu hóa mã lệnh đạt ngưỡng kịch trần, hệ thống vẫn chạm giới hạn vật lý của kiến trúc bộ nhớ vi điều khiển:
+* Yêu cầu băng thông: Với mô hình RNNoise 1.3MB và chu kỳ khung hình 10ms, hệ thống đòi hỏi tốc độ nạp I/O tối thiểu 130 MB/s chỉ riêng cho các lớp Dense.
+* Hiện tượng Trễ Bus (CPU Stall): Đặc tính của mạng RNN buộc mỗi trọng số chỉ được dùng một lần mỗi time-step. Điều này gây ra hiện tượng Cache thrashing (ghi đè liên tục) trên bộ đệm L1 (32KB) của ESP32-S3.
+* Kết luận Giai đoạn 1: Nút thắt hệ thống nằm ở tốc độ truyền tải (I/O bound), không phải năng lực tính toán (Compute bound). Việc ép vi điều khiển xử lý Real-time (10ms) với mô hình 1.3MB là bất khả thi về mặt vật lý.
+3. Giai đoạn 2: Kiến trúc Hybrid (Edge-to-Server)
+Để phá vỡ giới hạn phần cứng, hệ thống được tái cấu trúc sang mô hình Hybrid, phân tách vai trò rõ ràng giữa thiết bị biên (Edge) và máy chủ (Server).
+3.1. Tái thiết kế ESP32-S3 (Audio Gateway)
+Vi điều khiển được chuyển đổi vai trò thành cổng thu phát âm thanh, áp dụng mô hình Dual-Core Producer-Consumer để tối ưu hóa luồng dữ liệu:
+* Core 1 (Sampler): Chuyên trách thu âm I2S DMA và chuyển đổi định dạng.
+* Core 0 (Network): Đóng gói khung dữ liệu chính xác 960-bytes (chuẩn 10ms/48kHz) và truyền tải gói tin UDP qua FreeRTOS RingBuffer, đảm bảo không mất mát gói tin.
+3.2. Tối ưu hóa Xử lý AI tại Server
+Máy trạm hiệu năng cao (Ryzen 7 7840HS) đảm nhận xử lý mạng nơ-ron thông qua Shared Library (rnnoise.dll) được biên dịch bằng tập lệnh AVX2, tận dụng triệt để kiến trúc bộ nhớ đa tầng của PC.
+4. Phân tích Đối chiếu Hiệu năng: Căn nguyên của Nút thắt
+Sự chênh lệch khổng lồ về tài nguyên bộ nhớ và băng thông giữa hai nền tảng giải thích rõ vì sao máy trạm có thể xử lý mượt mà trong khi vi điều khiển bị quá tải:
+Thông số kỹ thuật
+	Vi điều khiển (ESP32-S3)
+	Máy trạm (AMD Ryzen 7 7840HS)
+	Mức chênh lệch
+	Băng thông RAM
+	~ 0.4 GB/s (PSRAM Octal)
+	~ 56 GB/s (DDR5)
+	~ 140 lần 
+	Bộ nhớ đệm (Cache)
+	32 KB (L1)
+	16 MB (L3) + 4 MB (L2)
+	~ 625 lần
+	Băng thông nạp Weight
+	Cực thấp (Phải nạp từ RAM ngoài mỗi frame do dung lượng L1 quá nhỏ)
+	Cực cao (Toàn bộ Weight 1.3MB nằm trọn vẹn trong Cache L2/L3)
+	Đột phá về mặt kiến trúc
+	Latency xử lý RNN
+	99.0 ms
+	< 0.1 ms
+	~ 990 lần
+	Xung nhịp CPU
+	240 MHz
+	3.8 - 5.1 GHz
+	~ 20 lần
+	Phân tích cho thấy: Năng lực của CPU chỉ chênh lệch 20 lần, nhưng sự vấp ngáp về Cache (chênh 625 lần) và Băng thông (chênh 140 lần) mới chính là lí do đẩy Latency xử lý RNN trên ESP32 lên gấp ~1000 lần so với máy trạm.
+5. Kết quả Thực nghiệm & Giám sát Hệ thống
+Hệ thống sau khi triển khai Hybrid đã đạt được các chỉ tiêu vận hành xuất sắc:
+* Độ trễ xử lý (Latency): Tổng thời gian xử lý duy trì cực kỳ ổn định ở mức < 10ms, đáp ứng hoàn hảo yêu cầu khắt khe của đàm thoại thời gian thực.
+* Chất lượng tín hiệu: Âm thanh đầu ra sạch, không bị nhiễu kỹ thuật hay hiện tượng mất khung hình (Drop-frame).
+Hệ thống Dashboard Giám sát (Real-time):
+* Waveform: Trực quan hóa sự khác biệt biên độ giữa tín hiệu Gốc (Raw) và tín hiệu Sạch (Clean).
+* Frequency Spectrum (A-F): Biểu đồ FFT minh chứng hiệu quả triệt tiêu các dải tần số nhiễu.
+* Tối ưu tài nguyên hiển thị (GUI Throttling): Giao diện được giới hạn ở 33 FPS, đảm bảo quan sát mượt mà không làm hao tổn tài nguyên GPU của máy chủ.
