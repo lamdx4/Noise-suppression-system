@@ -258,10 +258,49 @@ class Dashboard(QtWidgets.QMainWindow):
         self.clean_freq_curve = self.freq_plot.plot(pen=pg.mkPen('#00E676', width=1.5), name="Clean")
         right_panel.addWidget(self.freq_plot, 1)
 
+        # --- Spectrogram (Waterfall) ---
+        self.spectro_plot = pg.PlotWidget(title="Real-time Spectrogram (Waterfall)")
+        self.spectro_plot.setLabel('left', 'Frequency', units='Hz')
+        self.spectro_plot.setLabel('bottom', 'Time')
+        self.spectro_plot.setXRange(0, 100) # 100 frames
+        self.spectro_plot.setYRange(0, SAMPLE_RATE // 2)
+        
+        self.img = pg.ImageItem()
+        self.spectro_plot.addItem(self.img)
+        
+        # Color Map
+        colormap = pg.colormap.get('viridis')
+        bar = pg.ColorBarItem(values=(-60, 20), colorMap=colormap)
+        bar.setImageItem(self.img)
+        right_panel.addWidget(self.spectro_plot, 1)
+
+        # --- Clean Spectrogram (Waterfall) ---
+        self.spectro_plot_clean = pg.PlotWidget(title="Clean Spectrogram (Waterfall)")
+        self.spectro_plot_clean.setLabel('left', 'Frequency', units='Hz')
+        self.spectro_plot_clean.setLabel('bottom', 'Time')
+        self.spectro_plot_clean.setXRange(0, 100)
+        self.spectro_plot_clean.setYRange(0, SAMPLE_RATE // 2)
+        
+        self.img_clean = pg.ImageItem()
+        self.spectro_plot_clean.addItem(self.img_clean)
+        
+        bar_clean = pg.ColorBarItem(values=(-60, 20), colorMap=colormap)
+        bar_clean.setImageItem(self.img_clean)
+        right_panel.addWidget(self.spectro_plot_clean, 1)
+
         # Setup Buffers
         self.raw_buffer = np.zeros(FRAME_SIZE * 20)
         self.clean_buffer = np.zeros(FRAME_SIZE * 20)
         self.n_fft = 512
+        self.num_rows = 100 # History depth
+        self.spectro_data = np.full((self.num_rows, self.n_fft // 2 + 1), -60.0)
+        self.spectro_data_clean = np.full((self.num_rows, self.n_fft // 2 + 1), -60.0)
+        
+        # Scale images to match axes
+        rect = QtCore.QRectF(0, 0, self.num_rows, SAMPLE_RATE // 2)
+        self.img.setRect(rect)
+        self.img_clean.setRect(rect)
+        
         self.freq_axis = np.fft.rfftfreq(self.n_fft, 1/SAMPLE_RATE)
         self.window = np.hanning(FRAME_SIZE) # Pre-calculate window
         
@@ -295,6 +334,19 @@ class Dashboard(QtWidgets.QMainWindow):
         self.clean_buffer = np.roll(self.clean_buffer, -len(clean))
         self.clean_buffer[-len(clean):] = clean
         
+        # Update Spectrogram Buffers (Calculated every frame for smoothness)
+        raw_fft = np.abs(np.fft.rfft(raw * self.window, n=self.n_fft))
+        raw_db = 20 * np.log10(raw_fft + 1e-6)
+        
+        clean_fft = np.abs(np.fft.rfft(clean * self.window, n=self.n_fft))
+        clean_db = 20 * np.log10(clean_fft + 1e-6)
+        
+        self.spectro_data = np.roll(self.spectro_data, -1, axis=0)
+        self.spectro_data[-1, :] = raw_db
+        
+        self.spectro_data_clean = np.roll(self.spectro_data_clean, -1, axis=0)
+        self.spectro_data_clean[-1, :] = clean_db
+
         # Only update the visual plots every 3 frames (~33 FPS) to avoid lag
         self.update_counter += 1
         if self.update_counter % 3 != 0:
@@ -304,15 +356,12 @@ class Dashboard(QtWidgets.QMainWindow):
         self.clean_curve.setData(self.clean_buffer)
         self.vad_bar.setValue(int(vad * 100))
         
-        # Update Frequency Spectrum (FFT)
-        raw_fft = np.abs(np.fft.rfft(raw * self.window, n=self.n_fft))
-        raw_db = 20 * np.log10(raw_fft + 1e-6)
-        
-        clean_fft = np.abs(np.fft.rfft(clean * self.window, n=self.n_fft))
-        clean_db = 20 * np.log10(clean_fft + 1e-6)
-        
         self.raw_freq_curve.setData(self.freq_axis, raw_db)
         self.clean_freq_curve.setData(self.freq_axis, clean_db)
+        
+        # Update Waterfall Images
+        self.img.setImage(self.spectro_data.T, autoLevels=False)
+        self.img_clean.setImage(self.spectro_data_clean.T, autoLevels=False)
         
         self.latency_label.setText(f"Proc: {proc_time:.3f} ms")
         self.load_label.setText(f"Load: {(proc_time / 10.0) * 100:.1f}%")
