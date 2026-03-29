@@ -51,129 +51,48 @@
 #endif
 
 
-/* ============================================================================
- * BẢNG RANH GIỚI BAND THEO THANG ERB (Equivalent Rectangular Bandwidth)
- * ============================================================================
- *
- * ERB là đơn vị đo "độ rộng băng tần tương đương" - mô phỏng cách tai người
- * phân biệt tần số. Các giá trị dưới đây là chỉ số FFT bin tương ứng với
- * ranh giới của mỗi band (tính ở sample rate 48kHz).
- *
- * Ví dụ: Band 0 chứa bins 0-1 (0-100 Hz)
- *         Band 1 chứa bins 2-3 (100-200 Hz)
- *         Band 7 chứa bins 12-14 (600-750 Hz)
- *         ...
- *         Band 31 chứa bins 317-355 (15.9-17.8 kHz)
- *
- * Tại sao dùng ERB?
- * - Tai người phân giải tần số kém ở dải cao → cần ít band hơn
- * - Tai người phân giải tốt ở dải trung (1-4 kHz) → cần nhiều band hơn
- * - RNNoise dùng 32 bands → phù hợp cho neural network xử lý
- *
- * Công thức tính ERB:
- *   B(1)=400;
- *   for k=2:35
- *     B(k) = B(k-1) - max(2, round(24.7*(4.37*B(k-1)/20+1)/50));
- *   end
- */
+/* Bảng ranh giới 32 band theo thang ERB (tương thích với thính giác người) */
 const int eband20ms[NB_BANDS+2] = {
 /*0 100 200 300 400 500 600 750 900 1.1 1.2 1.4 1.6 1.8 2.1 2.4 2.7 3.0 3.4 3.9 4.4 4.9  5.5  6.2  7.0  7.9  8.8  9.9 11.2 12.6 14.1 15.9 17.8 20.0
   |        Dải thấp       |  Dải trung (lời nói)  |              Dải cao             |  */
   0, 2,  4,  6,  8,  10, 12, 15, 18, 21, 24, 28, 32, 36, 41, 47, 53, 60, 68, 77, 87, 98, 110, 124, 140, 157, 176, 198, 223, 251, 282, 317, 356, 400};
 
 
-/* ============================================================================
- * CẤU TRÚC TRẠNG THÁI DENOISE - Lưu trữ giữa các frame xử lý
- * ============================================================================
- *
- * RNNoise xử lý audio theo từng frame 10ms (480 samples @ 48kHz).
- * Cấu trúc này lưu trữ trạng thái giữa các frame để đảm bảo:
- * 1. Continuity: Các frame liên tiếp được xử lý nhất quán
- * 2. Pitch tracking: Theo dõi pitch period qua nhiều frames
- * 3. Signal smoothing: Tránh artifacts ở ranh giới frame
- */
+/* Lưu trạng thái giữa các frame để đảm bảo tiến xử lý liền mạch, pitch tracking, và không có artifact ở ranh giới frame */
 struct DenoiseState {
-  RNNoise model;                    /* Trọng số neural network */
+  RNNoise model;                    /* Trọng số mạng neural network */
 #if !TRAINING
   int arch;                         /* Kiến trúc CPU (ARM, x86, SIMD...) */
 #endif
 
-  /* ----- BỘ NHỚ FFT Analysis/Synthesis ----- */
+  /* Bộ nhớ FFT Analysis/Synthesis */
   float analysis_mem[FRAME_SIZE];   /* Đệm cho overlap-add (phân tích) */
   int memid;                        /* ID bộ nhớ (debug) */
   float synthesis_mem[FRAME_SIZE];  /* Đệm overlap-add (tổng hợp) */
 
-  /* ----- PITCH TRACKING ----- */
-  float pitch_buf[PITCH_BUF_SIZE];  /* Buffer lưu audio cho pitch detection
-                                       PITCH_BUF_SIZE = 768 + 960 = 1728 samples
-                                       Đủ để tìm pitch period trong khoảng 60-768 samples */
+  /* Pitch Tracking */
+  float pitch_buf[PITCH_BUF_SIZE];  /* Buffer lưu audio cho pitch detection (768 + 960 = 1728 samples) */
   float pitch_enh_buf[PITCH_BUF_SIZE]; /* Buffer cho pitch enhancement */
   float last_gain;                  /* Gain pitch của frame trước */
   int last_period;                  /* Pitch period (samples) của frame trước */
 
-  /* ----- HIGH-PASS FILTER MEMORY ----- */
+  /* High-Pass Filter Memory */
   float mem_hp_x[2];               /* Bộ nhớ bộ lọc high-pass để loại bỏ DC offset */
 
-  /* ----- GAIN SMOOTHING ----- */
+  /* Gain Smoothing */
   float lastg[NB_BANDS];           /* Gain của frame trước (cho smoothing) */
 
   RNNState rnn;                    /* Trạng thái hidden layer của RNN */
 
-  /* =========================================================================
-   * ĐỆM TRỄ (DELAY BUFFER) - QUAN TRỌNG CHO GIAI ĐOẠN 3: DSP SYNTHESIS
-   * =========================================================================
-   *
-   * Tại sao cần đệm trễ?
-   * - RNN cần ~1 frame để xử lý features
-   * - Pitch filter cần áp dụng lên frame đúng (không phải frame mới nhất)
-   * - Đệm trễ đảm bảo tín hiệu vào/ra được đồng bộ
-   *
-   * Signal flow:
-   *   Frame N-1 ──được lưu──> delayed_X/delayed_P
-   *                         │
-   *   Frame N ────FFT─────> X[N], P[N]
-   *                         │
-   *                    DSP Synthesis
-   *                         │
-   *                         ▼
-   *              Áp dụng pitch filter + gain
-   *              vào delayed_X (frame N-1)
-   *                         │
-   *                         ▼
-   *                    IFFT + Overlap-Add
-   *                         │
-   *                         ▼
-   *                   Clean Audio Output
-   */
+  /* Đệm trễ 1 frame: đảm bảo tín hiệu vào/ra đồng bộ khi RNN cần ~1 frame để xử lý */
   kiss_fft_cpx delayed_X[FREQ_SIZE];  /* Phổ tín hiệu đã trễ (481 bins) */
   kiss_fft_cpx delayed_P[FREQ_SIZE];  /* Phổ pitch đã trễ (481 bins) */
-  float delayed_Ex[NB_BANDS];          /* Band energies của X đã trễ (32 bands) */
-  float delayed_Ep[NB_BANDS];          /* Band energies của P đã trễ (32 bands) */
-  float delayed_Exp[NB_BANDS];         /* Band correlations đã trễ (32 bands) */
+  float delayed_Ex[NB_BANDS];          /* Năng lượng band của X đã trễ (32 bands) */
+  float delayed_Ep[NB_BANDS];          /* Năng lượng band của P đã trễ (32 bands) */
+  float delayed_Exp[NB_BANDS];         /* Tương quan band đã trễ (32 bands) */
 };
 
-/* ============================================================================
- * TÍNH NĂNG LƯỢNG BAND - Cung cấp 32 biên độ lọc cho Giai đoạn 3
- * ============================================================================
- *
- * Input:  X - Phổ phức từ FFT (kích thước FREQ_SIZE = 481 bins)
- * Output: bandE - Mảng 32 giá trị năng lượng, mỗi giá trị = tổng bình phương
- *         magnitude của tất cả FFT bins trong band tương ứng
- *
- * Thuật toán:
- * 1. Duyệt qua 32 bands (theo bảng eband20ms)
- * 2. Với mỗi bin trong band, tính magnitude² = real² + imag²
- * 3. Cộng dồn vào sum của band (có weighted interpolation giữa 2 bands)
- *
- * Tại sao cần "weighted interpolation"?
- * - FFT bins không khớp chính xác với ERB band boundaries
- * - Chia weight theo vị trí: bin gần boundary sẽ contribute vào cả 2 bands
- *
- * Ví dụ: Band i chứa bins từ eband20ms[i] đến eband20ms[i+1]-1
- *         Bin j trong band có vị trí frac = j/band_size
- *         → (1-frac)*tmp cộng vào sum[i]
- *         → frac*tmp cộng vào sum[i+1]
- */
+/* Tính năng lượng của 32 band từ phổ FFT (481 bins) */
 static void IRAM_ATTR compute_band_energy(float *bandE, const kiss_fft_cpx *X) {
   int i;
   float sum[NB_BANDS+2] = {0};
@@ -199,26 +118,7 @@ static void IRAM_ATTR compute_band_energy(float *bandE, const kiss_fft_cpx *X) {
   }
 }
 
-/* ============================================================================
- * TÍNH TƯƠNG QUAN BAND - Đo độ giống nhau giữa tín hiệu gốc và pitch
- * ============================================================================
- *
- * Input:  X - Phổ tín hiệu gốc
- *         P - Phổ pitch (đã chuẩn hóa theo pitch period)
- * Output: bandE - Mảng 32 giá trị tương quan (correlation)
- *
- * Công thức: correlation = Σ (X_real * P_real + X_imag * P_imag)
- *            = Dot product của 2 vectors trong không gian phức
- *
- * Ý nghĩa:
- * - Exp[i] cao → Tín hiệu ở band i chứa nhiều thành phần pitch (giọng nói)
- * - Exp[i] thấp → Band i chủ yếu là noise
- *
- * Tại sao cần correlation thay vì chỉ dùng energy?
- * - Energy chỉ cho biết "độ mạnh" của tín hiệu
- * - Correlation cho biết "tín hiệu có periodic (lặp lại) hay không"
- * - Periodic = có pitch = có giọng nói
- */
+/* Tính độ giống nhau giữa phổ tín hiệu gốc và phổ pitch (correlation = tín hiệu có periodic hay không) */
 static void compute_band_corr(float *bandE, const kiss_fft_cpx *X, const kiss_fft_cpx *P) {
   int i;
   float sum[NB_BANDS+2] = {0};
@@ -244,34 +144,7 @@ static void compute_band_corr(float *bandE, const kiss_fft_cpx *X, const kiss_ff
   }
 }
 
-/* ============================================================================
- * NỘI SUY GAIN TỪ 32 BANDS LÊN 481 BINS - "Nội suy 481 bins" trong sơ đồ
- * ============================================================================
- *
- * Input:  bandE - Mảng 32 giá trị gain (1 giá trị cho mỗi ERB band)
- * Output: g - Mảng 481 giá trị gain (1 giá trị cho mỗi FFT bin)
- *
- * Thuật toán: Linear interpolation giữa các band boundaries
- *
- * Ví dụ:
- *   Band 0: bins 0-1, value = bandE[0]
- *   Band 1: bins 2-3, value = bandE[1]
- *   Band 2: bins 4-5, value = bandE[2]
- *   ...
- *   Band 7: bins 12-14, value = bandE[7]
- *
- *   Bin 12 (ranh giới) → g[12] = (bandE[6] + bandE[7]) / 2
- *   Bin 13 → g[13] = bandE[7]
- *   ...
- *
- * Tại sao cần nội suy?
- * - RNN chỉ output 32 giá trị (1 giá trị cho mỗi band)
- * - Để apply gain lên phổ 481 bins, cần "fill in" các giá trị trung gian
- * - Linear interpolation là cách đơn giản và hiệu quả
- *
- * Trong sơ đồ Giai đoạn 3:
- *   "Cung cấp 32 biên độ lọc" ──interp_band_gain──> "Mặt nạ Gain G_f mềm" (481 bins)
- */
+/* Nội suy gain từ 32 bands lên 481 bins bằng phép nội suy tuyến tính */
 static void interp_band_gain(float *g, const float *bandE) {
   int i,j;
   memset(g, 0, FREQ_SIZE);
@@ -292,7 +165,8 @@ extern const float rnn_dct_table[];
 extern const kiss_fft_state rnn_kfft;
 extern const float rnn_half_window[];
 
-static void IRAM_ATTR dct(float *out, const float *in) {
+/* Biến đổi Fourier rời rạc cosin - chuyển đổi năng lượng band sang mạng neural network */
+static void dct(float *out, const float *in) {
   int i;
   for (i=0;i<NB_BANDS;i++) {
     int j;
@@ -318,6 +192,7 @@ static void idct(float *out, const float *in) {
 }
 #endif
 
+/* Chuyển đổi FFT thuận: miền thời gian (960 samples) -> miền tần số (481 bins) */
 static void forward_transform(kiss_fft_cpx *out, const float *in) {
   int i;
   kiss_fft_cpx x[WINDOW_SIZE];
@@ -332,32 +207,7 @@ static void forward_transform(kiss_fft_cpx *out, const float *in) {
   }
 }
 
-/* ============================================================================
- * IFFT (INVERSE FFT) - Phần của "IEFT" trong sơ đồ
- * ============================================================================
- *
- * Chuyển tín hiệu từ miền tần số (frequency domain) về miền thời gian
- * (time domain).
- *
- * Input:  in - Phổ phức kiss_fft_cpx (481 bins)
- * Output: out - Time-domain samples (960 samples = WINDOW_SIZE)
- *
- * Thuật toán:
- * 1. Symmetric extension: FFT chỉ lưu nửa phổ (0 → Nyquist)
- *    Cần reflect để có đủ WINDOW_SIZE bins:
- *    - bins 0..480 giữ nguyên
- *    - bins 481..959 là conjugate mirror của bins 1..479
- *
- * 2. FFT: Dùng cùng thuật toán FFT với conjugate symmetry
- *
- * 3. Trích real part: Vì input là symmetric, output chỉ cần lấy phần thực
- *    và nhân với WINDOW_SIZE (normalization factor)
- *
- * Tại sao dùng "reverse order" (line 350)?
- * - FFT/IFFT có tính chất: IFFT(FFT(x)) = N * x
- * - Để inverse đúng, cần đảo thứ tự bins trước khi FFT
- * - out[i] = y[WINDOW_SIZE - i] (với i > 0)
- */
+/* Chuyển đổi FFT ngược: miền tần số (481 bins) -> miền thời gian (960 samples) */
 static void inverse_transform(float *out, const kiss_fft_cpx *in) {
   int i;
   kiss_fft_cpx x[WINDOW_SIZE];
@@ -377,41 +227,7 @@ static void inverse_transform(float *out, const kiss_fft_cpx *in) {
   }
 }
 
-/* ============================================================================
- * ÁP CỬA SỔ (WINDOWING) - Dùng trong cả Analysis và Synthesis
- * ============================================================================
- *
- * Nhân tín hiệu với Hann window để smooth ở 2 đầu frame.
- *
- * Input/Output: x - Buffer kích thước WINDOW_SIZE (960 samples)
- *               Đây là IN-PLACE operation
- *
- * Hann Window:
- *   w[n] = 0.5 * (1 - cos(2πn / (N-1)))
- *   Với N = FRAME_SIZE = 480
- *
- * Window shape:
- *   Đầu frame (n=0..479):    w[n] tăng từ 0 → 1
- *   Cuối frame (n=480..959): w[n] giảm từ 1 → 0
- *
- * Tại sao cần windowing?
- * 1. STFT (Short-Time Fourier Transform) yêu cầu localized analysis
- * 2. Smooth transitions giữa các frames
- * 3. Tránh spectral leakage (năng lượng "tràn" sang bins lân cận)
- *
- * Trong Overlap-Add:
- *   - Frame N: window tail = 1 → window head = 0
- *   - Frame N+1: window tail = 0 → window head = 1
- *   - Khi cộng lại: 1 + 0 = 1 (hoặc 0 + 1 = 1) → tín hiệu liên tục
- *
- * Ví dụ với 50% overlap:
- *   Frame 0: [==== overlap ====][  output_0  ]  (w = 0..1)
- *   Frame 1:                          [  output_1  ][==== overlap ====]
- *                                            = 1 + 1 = 2
- *
- *   Cần normalize bằng cách nhân với 2 khi overlap = 50%
- *   (RNNoise dùng 50% overlap → mỗi sample được cộng 2 lần)
- */
+/* Nhân tín hiệu với cửa sổ Hann để fade-in/fade-out, giảm nhiễu spectral khi nối các frame */
 static void apply_window(float *x) {
   int i;
   for (i=0;i<FRAME_SIZE;i++) {
@@ -428,6 +244,7 @@ struct RNNModel {
   FILE *file;
 };
 
+/* Tạo model từ vùng nhớ chứa dữ liệu weights */
 RNNModel *rnnoise_model_from_buffer(const void *ptr, int len) {
   RNNModel *model;
   model = malloc(sizeof(*model));
@@ -437,6 +254,7 @@ RNNModel *rnnoise_model_from_buffer(const void *ptr, int len) {
   return model;
 }
 
+/* Đọc model từ file */
 RNNModel *rnnoise_model_from_filename(const char *filename) {
   RNNModel *model;
   FILE *f = fopen(filename, "rb");
@@ -445,6 +263,7 @@ RNNModel *rnnoise_model_from_filename(const char *filename) {
   return model;
 }
 
+/* Đọc model từ file đã mở */
 RNNModel *rnnoise_model_from_file(FILE *f) {
   RNNModel *model;
   model = malloc(sizeof(*model));
@@ -464,20 +283,24 @@ RNNModel *rnnoise_model_from_file(FILE *f) {
   return model;
 }
 
+/* Giải phóng bộ nhớ model */
 void rnnoise_model_free(RNNModel *model) {
   if (model->file != NULL) fclose(model->file);
   if (model->blob != NULL) free(model->blob);
   free(model);
 }
 
+/* Lấy kích thước bộ nhớ cần thiết cho DenoiseState */
 int rnnoise_get_size(void) {
   return sizeof(DenoiseState);
 }
 
+/* Lấy kích thước 1 frame (480 samples = 10ms ở 48kHz) */
 int rnnoise_get_frame_size(void) {
   return FRAME_SIZE;
 }
 
+/* Khởi tạo trạng thái denoise, nạp trọng số neural network */
 int rnnoise_init(DenoiseState *st, RNNModel *model) {
   memset(st, 0, sizeof(*st));
 #if !TRAINING
@@ -504,6 +327,7 @@ int rnnoise_init(DenoiseState *st, RNNModel *model) {
   return 0;
 }
 
+/* Tạo và khởi tạo trạng thái denoise */
 DenoiseState *rnnoise_create(RNNModel *model) {
   int ret;
   DenoiseState *st;
@@ -516,6 +340,7 @@ DenoiseState *rnnoise_create(RNNModel *model) {
   return st;
 }
 
+/* Xóa trạng thái denoise, giải phóng bộ nhớ */
 void rnnoise_destroy(DenoiseState *st) {
   free(st);
 }
@@ -525,6 +350,7 @@ extern int lowpass;
 extern int band_lp;
 #endif
 
+/* Phân tích 1 frame: FFT + tính năng lượng 32 band (cho bước DSP synthesis) */
 void rnn_frame_analysis(DenoiseState *st, kiss_fft_cpx *X, float *Ex, const float *in) {
   int i;
   float x[WINDOW_SIZE];
@@ -540,6 +366,7 @@ void rnn_frame_analysis(DenoiseState *st, kiss_fft_cpx *X, float *Ex, const floa
   compute_band_energy(Ex, X);
 }
 
+/* Tính tất cả đặc trưng cho mạng neural network: FFT, năng lượng band, tương quan, pitch */
 int rnn_compute_frame_features(DenoiseState *st, kiss_fft_cpx *X, kiss_fft_cpx *P,
                                   float *Ex, float *Ep, float *Exp, float *features, const float *in) {
   int i;
@@ -593,66 +420,7 @@ int rnn_compute_frame_features(DenoiseState *st, kiss_fft_cpx *X, kiss_fft_cpx *
   return TRAINING && E < 0.1;
 }
 
-/* ============================================================================
- * TỔNG HỢP KHUNG ÂM (FRAME SYNTHESIS) - Tương ứng với "IEFT" trong sơ đồ
- * ============================================================================
- *
- * Chuyển đổi tín hiệu từ miền tần số (frequency domain) về miền thời gian
- * (time domain) bằng IFFT, sau đó áp dụng Overlap-Add để nối các frames.
- *
- * Input:
- *   st - Trạng thái denoiser (chứa synthesis_mem)
- *   y  - Phổ phức trong frequency domain (481 bins)
- *   out - Output buffer (480 samples = 1 frame = 10ms @ 48kHz)
- *
- * Thuật toán:
- * ============================================================================
- *
- * BƯỚC 1: IFFT (Inverse FFT)
- * ----------------------------------------------------------------------------
- *   inverse_transform(x, y)
- *   Chuyển từ 481 frequency bins về 960 time-domain samples (WINDOW_SIZE)
- *
- * BƯỚC 2: ÁP CỬA SỔ (Windowing)
- * ----------------------------------------------------------------------------
- *   apply_window(x)
- *   Nhân với Hann window để smooth ở 2 đầu frame
- *   Tránh artifacts ở ranh giới frame
- *
- * BƯỚC 3: OVERLAP-ADD
- * ----------------------------------------------------------------------------
- *   overlap-add = frame_mới + overlap_của_frame_trước
- *   output[i] = x[i] + synthesis_mem[i]
- *
- *   Vì mỗi frame chỉ output 480 samples, nhưng window size = 960
- *   Nên 480 samples "đầu" của window chứa overlap từ frame trước
- *
- * BƯỚC 4: LƯU OVERLAP
- * ----------------------------------------------------------------------------
- *   synthesis_mem = x[FRAME_SIZE..WINDOW_SIZE-1]
- *   480 samples "cuối" được lưu để overlap với frame sau
- *
- * ============================================================================
- * Ví dụ với 3 frames:
- *
- * Frame 0:
- *   [  overlap_0  |  output_0  ]     output_0 = frame_0 + mem (mem = 0 ban đầu)
- *   [      480     |     480     ]
- *                                ^
- *                           Lưu overlap_1
- *
- * Frame 1:
- *   [  overlap_1  |  output_1  ]     output_1 = frame_1 + overlap_1
- *   [      480     |     480     ]
- *                                ^
- *                           Lưu overlap_2
- *
- * Frame 2:
- *   [  overlap_2  |  output_2  ]     output_2 = frame_2 + overlap_2
- *   ...
- *
- * Kết quả: Tín hiệu liên tục, không có "seam" ở ranh giới frame
- */
+/* Tổng hợp 1 frame: IFFT + cửa sổ Hann + overlap-add để nối các frame lại với nhau */
 static void frame_synthesis(DenoiseState *st, float *out, const kiss_fft_cpx *y) {
   float x[WINDOW_SIZE];
   int i;
@@ -662,6 +430,7 @@ static void frame_synthesis(DenoiseState *st, float *out, const kiss_fft_cpx *y)
   RNN_COPY(st->synthesis_mem, &x[FRAME_SIZE], FRAME_SIZE);
 }
 
+/* Bộ lọc biquad IIR 2 cạnh: dùng để lọc cao (loại DC offset) */
 void rnn_biquad(float *y, float mem[2], const float *x, const float *b, const float *a, int N) {
   int i;
   for (i=0;i<N;i++) {
@@ -674,67 +443,7 @@ void rnn_biquad(float *y, float mem[2], const float *x, const float *b, const fl
   }
 }
 
-/* ============================================================================
- * LỌC RĂNG LƯỢC PITCH - "Lọc răng lược Pitch" trong sơ đồ Giai đoạn 3
- * ============================================================================
- *
- * Mục đích: Tăng cường thành phần harmonic của giọng nói bằng cách kết hợp
- *           phổ tín hiệu gốc với phổ pitch đã chuẩn hóa.
- *
- * Input:
- *   X   - Phổ tín hiệu đầu vào (cần filter)
- *   P   - Phổ pitch (chứa thành phần periodic của tín hiệu)
- *   Ex  - Năng lượng band của X
- *   Ep  - Năng lượng band của P
- *   Exp - Tương quan band giữa X và P
- *   g   - Gain mask từ RNN (32 bands)
- *
- * Output: X được modify (thêm thành phần pitch vào)
- *
- * Thuật toán:
- * ============================================================================
- *
- * BƯỚC 1: Tính hệ số lọc răng lược r[i] cho mỗi band
- * ----------------------------------------------------------------------------
- * Công thức:
- *   Nếu Exp[i] > g[i]  → r[i] = 1 (tín hiệu có pitch rõ, giữ nguyên)
- *   Ngược lại          → r[i] = f(Exp[i], g[i])
- *
- * Trong đó:
- *   Exp[i] = correlation(X, P) = mức độ "có pitch" của tín hiệu
- *   g[i]   = gain từ RNN       = mức độ "có tiếng nói" theo neural network
- *
- * Logic:
- *   - Exp cao + g thấp → có pitch nhưng bị suppressed → restore
- *   - Exp thấp        → không có pitch (noise) → giữ nguyên
- *   - g cao           → neural network muốn giữ → ưu tiên
- *
- * BƯỚC 2: Nội suy r[i] từ 32 bands lên 481 bins
- * ----------------------------------------------------------------------------
- *   interp_band_gain(rf, r) → rf[0..480]
- *
- * BƯỚC 3: Trộn phổ X với P theo hệ số rf
- * ----------------------------------------------------------------------------
- *   X_new = X + rf * P
- *   (Thêm thành phần pitch vào tín hiệu gốc)
- *
- * BƯỚC 4: Normalize energy
- * ----------------------------------------------------------------------------
- *   Tính newE = energy(X_new)
- *   norm[i] = sqrt(Ex[i] / (newE[i] + epsilon))
- *   X_new *= normf (để đảm bảo energy không đổi sau filter)
- *
- * ============================================================================
- * Ý nghĩa vật lý:
- * ============================================================================
- * Giọng nói có cấu trúc harmonic (f0, 2f0, 3f0, 4f0...)
- * Bộ lọc răng lược (comb filter) tăng cường các thành phần này
- * → Giọng nói trong suốt và rõ ràng hơn
- * → Giảm artifacts từ noise suppression
- *
- * Trong sơ đồ:
- *   X_d, P_d ──> "Lọc răng lược Pitch" ──> "Phổ X_p đã tỉa"
- */
+/* Lọc răng lược pitch: tăng cường thành phần harmonic (f₀, 2f₀, 3f₀...) của lời nói bằng cách trộn phổ tín hiệu gốc với phổ pitch */
 void rnn_pitch_filter(kiss_fft_cpx *X, const kiss_fft_cpx *P, const float *Ex, const float *Ep,
                   const float *Exp, const float *g) {
   int i;
@@ -771,110 +480,7 @@ void rnn_pitch_filter(kiss_fft_cpx *X, const kiss_fft_cpx *P, const float *Ex, c
   }
 }
 
-/* ============================================================================
- * HÀM CHÍNH: XỬ LÝ 1 FRAME - Điều phối toàn bộ pipeline RNNoise
- * ============================================================================
- *
- * Đây là hàm public API duy nhất cần gọi từ bên ngoài.
- * Mỗi lần gọi xử lý 1 frame audio (480 samples = 10ms @ 48kHz)
- *
- * Input:
- *   st  - Trạng thái denoiser (đã được khởi tạo bằng rnnoise_create)
- *   in  - Buffer 480 samples audio đầu vào (float)
- *   out - Buffer 480 samples audio đã khử nhiễu (output)
- *
- * Return: Xác suất có tiếng nói (VAD probability) [0..1]
- *         > 0.5 → có tiếng nói, < 0.5 → silence/noise
- *
- * ============================================================================
- * PIPELINE TỔNG QUAN (3 GIAI ĐOẠN):
- * ============================================================================
- *
- * GIAI ĐOẠN 1: PHÂN TÍCH (Analysis)
- *   ├── High-pass filter (loại bỏ DC offset)
- *   ├── FFT analysis (time → frequency)
- *   ├── Pitch detection (tìm pitch period)
- *   └── Tính features (band energies, correlations)
- *
- * GIAI ĐOẠN 2: NEURAL NETWORK
- *   └── RNN inference: features → gain mask (32 bands)
- *
- * GIAI ĐOẠN 3: PHỤC HỒI VÀ CHỐNG MÉO (DSP Synthesis) ★
- *   ├── Lọc răng lược Pitch (pitch filtering)
- *   ├── Nội suy gain 32 → 481 bins
- *   ├── Nhân phổ (spectral masking)
- *   └── IFFT + Overlap-Add (→ clean audio)
- *
- * ============================================================================
- * CHI TIẾT GIAI ĐOẠN 3 (DSP SYNTHESIS) - Mapping với sơ đồ:
- * ============================================================================
- *
- *   ┌─────────────────────────────────────────────────────────────────────┐
- *   │  ĐỆM TRỄ 1 FRAME                                                   │
- *   │  delayed_X, delayed_P (từ frame trước)                              │
- *   │                                                                     │
- *   │    X_d, P_d ──→ ┌─────────────────────────┐                         │
- *   │                │ LỌC RĂNG LƯỢC PITCH   │ ──→ Phổ X_p đã tỉa     │
- *   │  32 bands ────→ │ (rnn_pitch_filter)     │                         │
- *   │  (Ex,Ep,Exp)    └─────────────────────────┘                         │
- *   │                                                                     │
- *   │  32 bands (g) ──→ ┌─────────────────────────┐                       │
- *   │                  │ NỘI SUY 481 BINS        │ ──→ Gain mask G_f     │
- *   │                  │ (interp_band_gain)       │                       │
- *   │                  └─────────────────────────┘                       │
- *   │                                                                     │
- *   │    X_p * G_f ──→ ┌─────────────────────────┐                       │
- *   │                  │ NHÂN PHỔ               │ ──→ Phổ đã khử nhiễu   │
- *   │                  │ delayed_X *= gf        │                         │
- *   │                  └─────────────────────────┘                       │
- *   │                            │                                       │
- *   │                            ▼                                       │
- *   │                  ┌─────────────────────────┐                       │
- *   │                  │ IFFT + OVERLAP-ADD     │ ──→ Âm thanh sạch      │
- *   │                  │ (frame_synthesis)       │     (480 samples)     │
- *   │                  └─────────────────────────┘                       │
- *   └─────────────────────────────────────────────────────────────────────┘
- *
- * ============================================================================
- * CÁC BƯỚC TRONG HÀM NÀY:
- * ============================================================================
- *
- * BƯỚC 1: High-pass filter (line 727)
- *   Loại bỏ DC offset và low-frequency noise (< ~80 Hz)
- *   Dùng bộ lọc IIR biquad
- *
- * BƯỚC 2: Tính features (line 728)
- *   FFT → Band energies → Features cho RNN
- *   (Chi tiết ở hàm rnn_compute_frame_features)
- *
- * BƯỚC 3: RNN Inference (line 732)
- *   Neural network tính gain mask g[32]
- *
- * BƯỚC 4: PITCH FILTERING (line 734) ★ GIAI ĐOẠN 3
- *   rnn_pitch_filter(delayed_X, delayed_P, ...)
- *   Tăng cường thành phần harmonic bằng comb filtering
- *
- * BƯỚC 5: GAIN SMOOTHING (lines 735-743)
- *   Giới hạn tốc độ thay đổi gain để tránh artifacts
- *   - G[band] = max(G[band], 0.6 * lastG[band])
- *   - lastG[band] = min(1, G[band] * energy_ratio)
- *
- * BƯỚC 6: NỘI SUY GAIN (line 744)
- *   interp_band_gain(gf, g)
- *   Chuyển gain từ 32 bands → 481 FFT bins
- *
- * BƯỚC 7: NHÂN PHỔ (lines 746-750)
- *   delayed_X *= gf (element-wise multiplication)
- *   → Phổ đã khử nhiễu (trong frequency domain)
- *
- * BƯỚC 8: IFFT + OVERLAP-ADD (line 752)
- *   frame_synthesis(out, delayed_X)
- *   Chuyển về time domain + nối frames
- *
- * BƯỚC 9: CẬP NHẬT DELAYED BUFFERS (lines 754-758)
- *   Lưu frame hiện tại vào delayed buffers
- *   → Frame sau sẽ dùng frame này để pitch filter
- */
+/* Hàm chính: xử lý 1 frame audio (480 samples = 10ms) - gọi từ bên ngoài để khử nhiễu */
 float rnnoise_process_frame(DenoiseState *st, float *out, const float *in) {
   int i;
   kiss_fft_cpx X[FREQ_SIZE];
@@ -896,67 +502,20 @@ float rnnoise_process_frame(DenoiseState *st, float *out, const float *in) {
 #if !TRAINING
     compute_rnn(&st->model, &st->rnn, g, &vad_prob, features, st->arch);
 #endif
+    /* Áp dụng lọc răng lược pitch lên frame trước (đã được lưu trong delayed buffer) */
     rnn_pitch_filter(st->delayed_X, st->delayed_P, st->delayed_Ex, st->delayed_Ep, st->delayed_Exp, g);
 
-    /* =========================================================================
-     * GAIN SMOOTHING - Làm mượt gain để tránh artifacts
-     * =========================================================================
-     *
-     * Vấn đề: RNN có thể thay đổi gain đột ngột giữa các frames
-     * → Gây ra "musical noise" (tiếng rít, bíp bíp)
-     *
-     * Giải pháp: Giới hạn tốc độ decay của gain
-     *
-     * Công thức 1: g[i] = max(g[i], 0.6 * lastg[i])
-     *   - Gain không được giảm quá 40% mỗi frame
-     *   - 0.6^10 ≈ 0.006 → sau 100ms gain có thể giảm 99.4%
-     *   - RT60 ( Reverberation Time) ≈ 135ms
-     *
-     * Công thức 2: lastg[i] = min(1, g[i] * delayed_Ex[i] / Ex[i])
-     *   - Compensate cho thay đổi energy
-     *   - Nếu frame hiện tại mạnh hơn frame trước → cho phép gain cao hơn
-     *   - Tránh "leaking noise" khi có transient (tiếng động đột ngột)
-     */
+    /* Làm mượt gain: giới hạn tốc độ thay đổi gain để tránh tạo ra tiếng rít (musical noise) */
     for (i=0;i<NB_BANDS;i++) {
       float alpha = .6f;
-      /* Giới hạn tốc độ decay: gain ≥ alpha * last_gain */
       g[i] = MAX16(g[i], alpha*st->lastg[i]);
-      /* Compensate thay đổi energy và lưu cho frame sau */
       st->lastg[i] = MIN16(1.f, g[i]*(st->delayed_Ex[i]+1e-3)/(Ex[i]+1e-3));
     }
 
-    /* =========================================================================
-     * NỘI SUY GAIN TỪ 32 BANDS → 481 FFT BINS
-     * =========================================================================
-     *
-     * "Mặt nạ Gain G_f mềm" trong sơ đồ
-     * RNN output: g[0..31] (32 giá trị)
-     * Cần apply: gf[0..480] (481 giá trị)
-     */
+    /* Nội suy gain từ 32 bands lên 481 bins */
     interp_band_gain(gf, g);
 
-    /* =========================================================================
-     * NHÂN PHỔ - "Nhân phổ X_p * G_f" trong sơ đồ ★
-     * =========================================================================
-     *
-     * Element-wise multiplication trong frequency domain
-     *
-     * Phép toán: delayed_X[i] *= gf[i]  (với i = 0..480)
-     *   delayed_X = Phổ đã pitch-filter (X_p)
-     *   gf        = Gain mask từ RNN (G_f)
-     *   Result    = Phổ đã khử nhiễu
-     *
-     * Ý nghĩa vật lý:
-     * - Nhân phổ = convolution trong time domain
-     * - Gain mask = bộ lọc "mềm" (soft mask)
-     * - Band nào có gain cao → giữ nguyên
-     * - Band nào có gain thấp → suppressed (giảm amplitude)
-     *
-     * Tại sao dùng delayed_X thay vì X?
-     * - delayed_X là frame N-1 (đã được FFT ở frame trước)
-     * - X là frame N (FFT vừa được tính)
-     * - Pitch filter và gain phải áp dụng vào frame đúng với features
-     */
+    /* Nhân phổ với gain mask: làm yếu những band bị cho là nhiễu, giữ nguyên những band có lời nói */
 #if 1
     for (i=0;i<FREQ_SIZE;i++) {
       st->delayed_X[i].r *= gf[i];
@@ -964,8 +523,10 @@ float rnnoise_process_frame(DenoiseState *st, float *out, const float *in) {
     }
 #endif
   }
+  /* Chuyển phổ về miền thời gian bằng IFFT và nối với frame trước bằng overlap-add */
   frame_synthesis(st, out, st->delayed_X);
 
+  /* Lưu frame hiện tại vào delayed buffer để frame sau sử dụng */
   RNN_COPY(st->delayed_X, X, FREQ_SIZE);
   RNN_COPY(st->delayed_P, P, FREQ_SIZE);
   RNN_COPY(st->delayed_Ex, Ex, NB_BANDS);
@@ -973,4 +534,3 @@ float rnnoise_process_frame(DenoiseState *st, float *out, const float *in) {
   RNN_COPY(st->delayed_Exp, Exp, NB_BANDS);
   return vad_prob;
 }
-
