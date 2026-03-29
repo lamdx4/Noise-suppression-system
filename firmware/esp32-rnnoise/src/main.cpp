@@ -20,9 +20,9 @@
 // =============================================================
 // CONFIGURATION
 // =============================================================
-#define WIFI_SSID "J19"
-#define WIFI_PASS "hoangchimbe"
-#define PC_IP_ADDR "192.168.1.16"
+#define WIFI_SSID "POCO"
+#define WIFI_PASS "pocopoco"
+#define PC_IP_ADDR "10.232.145.213"
 #define PC_PORT 12345
 
 #define BUFFER_SIZE (FRAME_SIZE * sizeof(int16_t)) // 960 bytes
@@ -142,7 +142,7 @@ void udp_sender_task(void *pvParameters)
         vTaskDelete(NULL);
     }
 
-    int snd_buf_size = 32 * 1024;
+    int snd_buf_size = 16 * 1024;
     int err_opt = setsockopt(sock, SOL_SOCKET, SO_SNDBUF, &snd_buf_size, sizeof(snd_buf_size));
     if (err_opt != 0)
         ESP_LOGE(TAG, "UDP Sender Task: Failed to set buffer size");
