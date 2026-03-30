@@ -51,42 +51,48 @@
 #endif
 
 
-/* ERB bandwidths going in reverse from 20 kHz and then replacing the 700 and 800
-   with just 750 because having 32 bands is convenient for the DNN. 
-   B(1)=400;
-   for k=2:35
-     B(k) = B(k-1) - max(2, round(24.7*(4.37*B(k-1)/20+1)/50));
-   end
-   printf("%d, ", B(end:-1:1));
-   printf("\n")
-*/
+/* Bảng ranh giới 32 band theo thang ERB (tương thích với thính giác người) */
 const int eband20ms[NB_BANDS+2] = {
-/*0 100 200 300 400 500 600 750 900 1.1 1.2 1.4 1.6 1.8 2.1 2.4 2.7 3.0 3.4 3.9 4.4 4.9  5.5  6.2  7.0  7.9  8.8  9.9 11.2 12.6 14.1 15.9 17.8 20.0*/
+/*0 100 200 300 400 500 600 750 900 1.1 1.2 1.4 1.6 1.8 2.1 2.4 2.7 3.0 3.4 3.9 4.4 4.9  5.5  6.2  7.0  7.9  8.8  9.9 11.2 12.6 14.1 15.9 17.8 20.0
+  |        Dải thấp       |  Dải trung (lời nói)  |              Dải cao             |  */
   0, 2,  4,  6,  8,  10, 12, 15, 18, 21, 24, 28, 32, 36, 41, 47, 53, 60, 68, 77, 87, 98, 110, 124, 140, 157, 176, 198, 223, 251, 282, 317, 356, 400};
 
 
+/* Lưu trạng thái giữa các frame để đảm bảo tiến xử lý liền mạch, pitch tracking, và không có artifact ở ranh giới frame */
 struct DenoiseState {
-  RNNoise model;
+  RNNoise model;                    /* Trọng số mạng neural network */
 #if !TRAINING
-  int arch;
+  int arch;                         /* Kiến trúc CPU (ARM, x86, SIMD...) */
 #endif
-  float analysis_mem[FRAME_SIZE];
-  int memid;
-  float synthesis_mem[FRAME_SIZE];
-  float pitch_buf[PITCH_BUF_SIZE];
-  float pitch_enh_buf[PITCH_BUF_SIZE];
-  float last_gain;
-  int last_period;
-  float mem_hp_x[2];
-  float lastg[NB_BANDS];
-  RNNState rnn;
-  kiss_fft_cpx delayed_X[FREQ_SIZE];
-  kiss_fft_cpx delayed_P[FREQ_SIZE];
-  float delayed_Ex[NB_BANDS], delayed_Ep[NB_BANDS];
-  float delayed_Exp[NB_BANDS];
 
+  /* Bộ nhớ FFT Analysis/Synthesis */
+  float analysis_mem[FRAME_SIZE];   /* Đệm cho overlap-add (phân tích) */
+  int memid;                        /* ID bộ nhớ (debug) */
+  float synthesis_mem[FRAME_SIZE];  /* Đệm overlap-add (tổng hợp) */
+
+  /* Pitch Tracking */
+  float pitch_buf[PITCH_BUF_SIZE];  /* Buffer lưu audio cho pitch detection (768 + 960 = 1728 samples) */
+  float pitch_enh_buf[PITCH_BUF_SIZE]; /* Buffer cho pitch enhancement */
+  float last_gain;                  /* Gain pitch của frame trước */
+  int last_period;                  /* Pitch period (samples) của frame trước */
+
+  /* High-Pass Filter Memory */
+  float mem_hp_x[2];               /* Bộ nhớ bộ lọc high-pass để loại bỏ DC offset */
+
+  /* Gain Smoothing */
+  float lastg[NB_BANDS];           /* Gain của frame trước (cho smoothing) */
+
+  RNNState rnn;                    /* Trạng thái hidden layer của RNN */
+
+  /* Đệm trễ 1 frame: đảm bảo tín hiệu vào/ra đồng bộ khi RNN cần ~1 frame để xử lý */
+  kiss_fft_cpx delayed_X[FREQ_SIZE];  /* Phổ tín hiệu đã trễ (481 bins) */
+  kiss_fft_cpx delayed_P[FREQ_SIZE];  /* Phổ pitch đã trễ (481 bins) */
+  float delayed_Ex[NB_BANDS];          /* Năng lượng band của X đã trễ (32 bands) */
+  float delayed_Ep[NB_BANDS];          /* Năng lượng band của P đã trễ (32 bands) */
+  float delayed_Exp[NB_BANDS];         /* Tương quan band đã trễ (32 bands) */
 };
 
+/* Tính năng lượng của 32 band từ phổ FFT (481 bins) */
 static void IRAM_ATTR compute_band_energy(float *bandE, const kiss_fft_cpx *X) {
   int i;
   float sum[NB_BANDS+2] = {0};
@@ -112,6 +118,7 @@ static void IRAM_ATTR compute_band_energy(float *bandE, const kiss_fft_cpx *X) {
   }
 }
 
+/* Tính độ giống nhau giữa phổ tín hiệu gốc và phổ pitch (correlation = tín hiệu có periodic hay không) */
 static void compute_band_corr(float *bandE, const kiss_fft_cpx *X, const kiss_fft_cpx *P) {
   int i;
   float sum[NB_BANDS+2] = {0};
@@ -137,6 +144,7 @@ static void compute_band_corr(float *bandE, const kiss_fft_cpx *X, const kiss_ff
   }
 }
 
+/* Nội suy gain từ 32 bands lên 481 bins bằng phép nội suy tuyến tính */
 static void interp_band_gain(float *g, const float *bandE) {
   int i,j;
   memset(g, 0, FREQ_SIZE);
@@ -157,7 +165,8 @@ extern const float rnn_dct_table[];
 extern const kiss_fft_state rnn_kfft;
 extern const float rnn_half_window[];
 
-static void IRAM_ATTR dct(float *out, const float *in) {
+/* Biến đổi Fourier rời rạc cosin - chuyển đổi năng lượng band sang mạng neural network */
+static void dct(float *out, const float *in) {
   int i;
   for (i=0;i<NB_BANDS;i++) {
     int j;
@@ -183,6 +192,7 @@ static void idct(float *out, const float *in) {
 }
 #endif
 
+/* Chuyển đổi FFT thuận: miền thời gian (960 samples) -> miền tần số (481 bins) */
 static void forward_transform(kiss_fft_cpx *out, const float *in) {
   int i;
   kiss_fft_cpx x[WINDOW_SIZE];
@@ -197,6 +207,7 @@ static void forward_transform(kiss_fft_cpx *out, const float *in) {
   }
 }
 
+/* Chuyển đổi FFT ngược: miền tần số (481 bins) -> miền thời gian (960 samples) */
 static void inverse_transform(float *out, const kiss_fft_cpx *in) {
   int i;
   kiss_fft_cpx x[WINDOW_SIZE];
@@ -216,6 +227,7 @@ static void inverse_transform(float *out, const kiss_fft_cpx *in) {
   }
 }
 
+/* Nhân tín hiệu với cửa sổ Hann để fade-in/fade-out, giảm nhiễu spectral khi nối các frame */
 static void apply_window(float *x) {
   int i;
   for (i=0;i<FRAME_SIZE;i++) {
@@ -232,6 +244,7 @@ struct RNNModel {
   FILE *file;
 };
 
+/* Tạo model từ vùng nhớ chứa dữ liệu weights */
 RNNModel *rnnoise_model_from_buffer(const void *ptr, int len) {
   RNNModel *model;
   model = malloc(sizeof(*model));
@@ -241,6 +254,7 @@ RNNModel *rnnoise_model_from_buffer(const void *ptr, int len) {
   return model;
 }
 
+/* Đọc model từ file */
 RNNModel *rnnoise_model_from_filename(const char *filename) {
   RNNModel *model;
   FILE *f = fopen(filename, "rb");
@@ -249,6 +263,7 @@ RNNModel *rnnoise_model_from_filename(const char *filename) {
   return model;
 }
 
+/* Đọc model từ file đã mở */
 RNNModel *rnnoise_model_from_file(FILE *f) {
   RNNModel *model;
   model = malloc(sizeof(*model));
@@ -268,20 +283,24 @@ RNNModel *rnnoise_model_from_file(FILE *f) {
   return model;
 }
 
+/* Giải phóng bộ nhớ model */
 void rnnoise_model_free(RNNModel *model) {
   if (model->file != NULL) fclose(model->file);
   if (model->blob != NULL) free(model->blob);
   free(model);
 }
 
+/* Lấy kích thước bộ nhớ cần thiết cho DenoiseState */
 int rnnoise_get_size(void) {
   return sizeof(DenoiseState);
 }
 
+/* Lấy kích thước 1 frame (480 samples = 10ms ở 48kHz) */
 int rnnoise_get_frame_size(void) {
   return FRAME_SIZE;
 }
 
+/* Khởi tạo trạng thái denoise, nạp trọng số neural network */
 int rnnoise_init(DenoiseState *st, RNNModel *model) {
   memset(st, 0, sizeof(*st));
 #if !TRAINING
@@ -308,6 +327,7 @@ int rnnoise_init(DenoiseState *st, RNNModel *model) {
   return 0;
 }
 
+/* Tạo và khởi tạo trạng thái denoise */
 DenoiseState *rnnoise_create(RNNModel *model) {
   int ret;
   DenoiseState *st;
@@ -320,6 +340,7 @@ DenoiseState *rnnoise_create(RNNModel *model) {
   return st;
 }
 
+/* Xóa trạng thái denoise, giải phóng bộ nhớ */
 void rnnoise_destroy(DenoiseState *st) {
   free(st);
 }
@@ -329,6 +350,7 @@ extern int lowpass;
 extern int band_lp;
 #endif
 
+/* Phân tích 1 frame: FFT + tính năng lượng 32 band (cho bước DSP synthesis) */
 void rnn_frame_analysis(DenoiseState *st, kiss_fft_cpx *X, float *Ex, const float *in) {
   int i;
   float x[WINDOW_SIZE];
@@ -344,6 +366,7 @@ void rnn_frame_analysis(DenoiseState *st, kiss_fft_cpx *X, float *Ex, const floa
   compute_band_energy(Ex, X);
 }
 
+/* Tính tất cả đặc trưng cho mạng neural network: FFT, năng lượng band, tương quan, pitch */
 int rnn_compute_frame_features(DenoiseState *st, kiss_fft_cpx *X, kiss_fft_cpx *P,
                                   float *Ex, float *Ep, float *Exp, float *features, const float *in) {
   int i;
@@ -397,6 +420,7 @@ int rnn_compute_frame_features(DenoiseState *st, kiss_fft_cpx *X, kiss_fft_cpx *
   return TRAINING && E < 0.1;
 }
 
+/* Tổng hợp 1 frame: IFFT + cửa sổ Hann + overlap-add để nối các frame lại với nhau */
 static void frame_synthesis(DenoiseState *st, float *out, const kiss_fft_cpx *y) {
   float x[WINDOW_SIZE];
   int i;
@@ -406,6 +430,7 @@ static void frame_synthesis(DenoiseState *st, float *out, const kiss_fft_cpx *y)
   RNN_COPY(st->synthesis_mem, &x[FRAME_SIZE], FRAME_SIZE);
 }
 
+/* Bộ lọc biquad IIR 2 cạnh: dùng để lọc cao (loại DC offset) */
 void rnn_biquad(float *y, float mem[2], const float *x, const float *b, const float *a, int N) {
   int i;
   for (i=0;i<N;i++) {
@@ -418,6 +443,7 @@ void rnn_biquad(float *y, float mem[2], const float *x, const float *b, const fl
   }
 }
 
+/* Lọc răng lược pitch: tăng cường thành phần harmonic (f₀, 2f₀, 3f₀...) của lời nói bằng cách trộn phổ tín hiệu gốc với phổ pitch */
 void rnn_pitch_filter(kiss_fft_cpx *X, const kiss_fft_cpx *P, const float *Ex, const float *Ep,
                   const float *Exp, const float *g) {
   int i;
@@ -454,6 +480,7 @@ void rnn_pitch_filter(kiss_fft_cpx *X, const kiss_fft_cpx *P, const float *Ex, c
   }
 }
 
+/* Hàm chính: xử lý 1 frame audio (480 samples = 10ms) - gọi từ bên ngoài để khử nhiễu */
 float rnnoise_process_frame(DenoiseState *st, float *out, const float *in) {
   int i;
   kiss_fft_cpx X[FREQ_SIZE];
@@ -475,17 +502,20 @@ float rnnoise_process_frame(DenoiseState *st, float *out, const float *in) {
 #if !TRAINING
     compute_rnn(&st->model, &st->rnn, g, &vad_prob, features, st->arch);
 #endif
+    /* Áp dụng lọc răng lược pitch lên frame trước (đã được lưu trong delayed buffer) */
     rnn_pitch_filter(st->delayed_X, st->delayed_P, st->delayed_Ex, st->delayed_Ep, st->delayed_Exp, g);
+
+    /* Làm mượt gain: giới hạn tốc độ thay đổi gain để tránh tạo ra tiếng rít (musical noise) */
     for (i=0;i<NB_BANDS;i++) {
       float alpha = .6f;
-      /* Cap the decay at 0.6 per frame, corresponding to an RT60 of 135 ms.
-         That avoids unnaturally quick attenuation. */
       g[i] = MAX16(g[i], alpha*st->lastg[i]);
-      /* Compensate for energy change across frame when computing the threshold gain.
-         Avoids leaking noise when energy increases (e.g. transient noise). */
       st->lastg[i] = MIN16(1.f, g[i]*(st->delayed_Ex[i]+1e-3)/(Ex[i]+1e-3));
     }
+
+    /* Nội suy gain từ 32 bands lên 481 bins */
     interp_band_gain(gf, g);
+
+    /* Nhân phổ với gain mask: làm yếu những band bị cho là nhiễu, giữ nguyên những band có lời nói */
 #if 1
     for (i=0;i<FREQ_SIZE;i++) {
       st->delayed_X[i].r *= gf[i];
@@ -493,8 +523,10 @@ float rnnoise_process_frame(DenoiseState *st, float *out, const float *in) {
     }
 #endif
   }
+  /* Chuyển phổ về miền thời gian bằng IFFT và nối với frame trước bằng overlap-add */
   frame_synthesis(st, out, st->delayed_X);
 
+  /* Lưu frame hiện tại vào delayed buffer để frame sau sử dụng */
   RNN_COPY(st->delayed_X, X, FREQ_SIZE);
   RNN_COPY(st->delayed_P, P, FREQ_SIZE);
   RNN_COPY(st->delayed_Ex, Ex, NB_BANDS);
@@ -502,4 +534,3 @@ float rnnoise_process_frame(DenoiseState *st, float *out, const float *in) {
   RNN_COPY(st->delayed_Exp, Exp, NB_BANDS);
   return vad_prob;
 }
-
